@@ -1,0 +1,20 @@
+# Local only. npm run dev adds a loopback-only development override.
+# Use a separate Telegram test group if you add credentials here.
+DEV_MODE=true
+TELEGRAM_CHAT_ID=-1001234567890
+TELEGRAM_BOT_USERNAME=
+# Public workers.dev origin; used for the webhook and separate per-group scheduled invocations.
+WORKER_URL=
+OWNER_TELEGRAM_ID=123456789
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+OPENROUTER_API_KEY=
+# Postgres is optional. Configure schema first with npm run database:setup.
+# Use PlanetScale's pooled port 6432 and keep this file ignored.
+DATABASE_BACKEND=sqlite
+PLANETSCALE_DATABASE_URL=
+# Optional one-time setup role; never deploy this admin connection to the Worker.
+PLANETSCALE_ADMIN_DATABASE_URL=
+CUSTOM_API_KEY=
+# Optional custom providers; never expose these credentials to the frontend.
+# MODEL_PROVIDERS_JSON=[{"id":"custom","name":"Custom","baseUrl":"https://example.com/v1","apiKeyEnv":"CUSTOM_API_KEY","format":"json_object"}]

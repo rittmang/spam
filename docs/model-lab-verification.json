@@ -1,0 +1,43 @@
+{
+  "verified_at": "2026-10-10T21:22:46.635Z",
+  "dataset_messages": 4947,
+  "sample_per_model": 200,
+  "labelled": 0,
+  "lab_daily_budget": null,
+  "moderation_daily_budget": 100000,
+  "moderation_tokens_after": 0,
+  "lab_tokens_after": 235234,
+  "combined_cost_usd": 0.019779249999999998,
+  "runs": [
+    {
+      "cost": 0.011505149999999997,
+      "cursor": 200,
+      "error": "",
+      "id": "c9a1721b-6769-4f2c-be7b-86162b3655ca",
+      "input_tokens": 76701,
+      "labelled": 0,
+      "latency_ms": 9728,
+      "model": "cloudflare/clef-omni",
+      "output_tokens": 0,
+      "predictions": 200,
+      "status": "complete",
+      "total": 200,
+      "validMapping": true
+    },
+    {
+      "cost": 0.008274100000000001,
+      "cursor": 200,
+      "error": "",
+      "id": "b607347d-0e05-4d6f-bb50-2629cc215977",
+      "input_tokens": 53805,
+      "labelled": 0,
+      "latency_ms": 27961,
+      "model": "google/gemini-2.5-flash-lite",
+      "output_tokens": 7234,
+      "predictions": 200,
+      "status": "complete",
+      "total": 200,
+      "validMapping": true
+    }
+  ]
+}
