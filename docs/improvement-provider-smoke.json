@@ -1,0 +1,212 @@
+{
+  "date": "2026-10-12T22:43:23.723Z",
+  "scope": "Five synthetic text cases; provider smoke, not a validation or sealed test. No project data, Telegram actions, or live settings were used.",
+  "proposal": {
+    "policy": "Moderation focuses on preventing harmful and disruptive activities. This includes identifying and addressing scams, phishing attempts, and deceptive commercial solicitations. Unsolicited promotion of external groups or services, especially those requiring membership or payment without clear legitimate authority, will be reviewed. Disruptive repeated messaging is prohibited, but isolated instances of greetings, questions, emojis, or relevant links are not considered spam. Multilingual content will be treated with fairness. When context is insufficient for a definitive decision, the default action is review with an explanation of the uncertainty, rather than assuming guilt.",
+    "criteria": [
+      "Scams and phishing",
+      "Unsolicited commercial promotion",
+      "Disruptive repeated messaging"
+    ],
+    "model": "google/gemini-2.5-flash-lite",
+    "provider": "openrouter",
+    "usage": {
+      "tokens": 441,
+      "cost": 0.0000906
+    }
+  },
+  "baseline": {
+    "model": "google/gemini-2.5-flash-lite",
+    "provider": "Google",
+    "results": [
+      {
+        "id": "a",
+        "score": 0.9,
+        "category": "scam",
+        "reason": "The message requests sensitive financial information, which is a common scam tactic.",
+        "needs_review": false
+      },
+      {
+        "id": "b",
+        "score": 0.8,
+        "category": "unsolicited commercial promotion",
+        "reason": "This message promotes a paid service with guaranteed returns, which is likely a commercial promotion.",
+        "needs_review": false
+      },
+      {
+        "id": "c",
+        "score": 0.1,
+        "category": "legitimate",
+        "reason": "This is a simple question seeking information and does not violate the spam policy.",
+        "needs_review": false
+      },
+      {
+        "id": "d",
+        "score": 0.1,
+        "category": "legitimate",
+        "reason": "This message provides information about an event and is not spam.",
+        "needs_review": false
+      },
+      {
+        "id": "e",
+        "score": 0.7,
+        "category": "disruptive",
+        "reason": "The message is a command to fill a form with a deadline, which could be disruptive in certain contexts, especially if it's a follow-up to a previous non-legitimate message.",
+        "needs_review": true
+      }
+    ],
+    "input": 520,
+    "output": 353,
+    "cost": 0.0001932
+  },
+  "candidate": {
+    "model": "google/gemini-2.5-flash-lite",
+    "provider": "Google",
+    "results": [
+      {
+        "id": "a",
+        "score": 0.9,
+        "category": "scam",
+        "reason": "The message is soliciting sensitive personal information for a guaranteed payout, which is a common scam tactic.",
+        "needs_review": false
+      },
+      {
+        "id": "b",
+        "score": 0.8,
+        "category": "scam",
+        "reason": "This message promotes a paid channel with guaranteed returns, which is a deceptive commercial solicitation.",
+        "needs_review": false
+      },
+      {
+        "id": "c",
+        "score": 0.1,
+        "category": "legitimate",
+        "reason": "This is a straightforward question seeking information about a timetable.",
+        "needs_review": false
+      },
+      {
+        "id": "d",
+        "score": 0.1,
+        "category": "legitimate",
+        "reason": "This message provides information about a legitimate event and encourages attendance.",
+        "needs_review": false
+      },
+      {
+        "id": "e",
+        "score": 0.7,
+        "category": "deceptive",
+        "reason": "The message implies a mandatory action with a deadline, which could be part of a deceptive scheme without further context.",
+        "needs_review": true
+      }
+    ],
+    "input": 562,
+    "output": 333,
+    "cost": 0.0001894
+  },
+  "gate": {
+    "pass": false,
+    "checks": {
+      "pairedReferences": true,
+      "noNewFalsePositives": true,
+      "noNewMisses": true,
+      "noNewAmbiguousSpam": true,
+      "preserveCorrectReviews": true,
+      "improvesWeightedLoss": false,
+      "unnecessaryReviewCap": true,
+      "inferenceCostKnownAndBounded": true
+    },
+    "baseline": {
+      "total": 5,
+      "families": 5,
+      "falsePositives": [],
+      "misses": [],
+      "ambiguousSpam": [],
+      "correctReviews": ["e"],
+      "unnecessaryReviews": [],
+      "spamFlagged": 1,
+      "spamDeferred": 1,
+      "reviews": 2,
+      "loss": 0.5,
+      "rows": [
+        {
+          "id": "a",
+          "family": "credential-theft",
+          "label": "spam",
+          "decision": "spam"
+        },
+        {
+          "id": "b",
+          "family": "commercial-trading",
+          "label": "spam",
+          "decision": "review"
+        },
+        {
+          "id": "c",
+          "family": "academic-question",
+          "label": "ham",
+          "decision": "ham"
+        },
+        {
+          "id": "d",
+          "family": "community-announcement",
+          "label": "ham",
+          "decision": "ham"
+        },
+        {
+          "id": "e",
+          "family": "missing-authority",
+          "label": "review",
+          "decision": "review"
+        }
+      ]
+    },
+    "candidate": {
+      "total": 5,
+      "families": 5,
+      "falsePositives": [],
+      "misses": [],
+      "ambiguousSpam": [],
+      "correctReviews": ["e"],
+      "unnecessaryReviews": [],
+      "spamFlagged": 1,
+      "spamDeferred": 1,
+      "reviews": 2,
+      "loss": 0.5,
+      "rows": [
+        {
+          "id": "a",
+          "family": "credential-theft",
+          "label": "spam",
+          "decision": "spam"
+        },
+        {
+          "id": "b",
+          "family": "commercial-trading",
+          "label": "spam",
+          "decision": "review"
+        },
+        {
+          "id": "c",
+          "family": "academic-question",
+          "label": "ham",
+          "decision": "ham"
+        },
+        {
+          "id": "d",
+          "family": "community-announcement",
+          "label": "ham",
+          "decision": "ham"
+        },
+        {
+          "id": "e",
+          "family": "missing-authority",
+          "label": "review",
+          "decision": "review"
+        }
+      ]
+    },
+    "costRatio": 0.9803312629399585
+  },
+  "totalCost": 0.0004732,
+  "published": false
+}

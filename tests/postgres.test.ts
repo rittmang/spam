@@ -355,11 +355,19 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('Postgres backend in Workers runtime', (
     const runs = (await response.json()) as Evaluation[];
     expect(runs.map((r) => r.id)).toEqual(['new', 'old']);
     expect(runs[1].examples).toEqual([
-      { id: 'z', text, label: 'spam', userId: null, context: ['Earlier message'], media: 'photo' },
-      { id: 'a', text: 'Hello', label: null, userId: '42', context: [], media: '' },
+      {
+        id: 'z',
+        text,
+        label: 'spam',
+        userId: null,
+        context: ['Earlier message'],
+        media: 'photo',
+        family: '',
+      },
+      { id: 'a', text: 'Hello', label: null, userId: '42', context: [], media: '', family: '' },
     ]);
     expect(runs[1].predictions).toEqual([
-      { id: 'z', score: 0.93, category: 'promotion', reason: 'Saved reason' },
+      { id: 'z', score: 0.93, category: 'promotion', reason: 'Saved reason', needs_review: false },
     ]);
     expect(runs[1].reviewLabels).toEqual([{ id: 'z', label: null, updated_at: 300 }]);
     expect(runs[0].reviewLabels).toEqual([]);

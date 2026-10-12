@@ -3,6 +3,7 @@ import { GroupService } from './group';
 import { SqliteDatabase } from './database';
 import { defaultSettings } from '../shared/types';
 import type { Env } from './env';
+import { IMPROVEMENT_SCHEMA } from './improvement-schema';
 export interface LocalEnv extends Env {
   GROUPS: DurableObjectNamespace;
 }
@@ -50,6 +51,24 @@ export class GroupModerator extends GroupService {
       SELECT d.id,COUNT(e.id),COALESCE(SUM(CASE WHEN e.label IS NOT NULL THEN 1 ELSE 0 END),0)
       FROM datasets d LEFT JOIN examples e ON e.dataset_id=d.id
       WHERE NOT EXISTS(SELECT 1 FROM dataset_stats s WHERE s.id=d.id) GROUP BY d.id`);
+    ctx.storage.sql.exec(IMPROVEMENT_SCHEMA);
+    for (const [table, column, definition] of [
+      ['messages', 'classification_snapshot', "TEXT NOT NULL DEFAULT ''"],
+      ['predictions', 'needs_review', 'INTEGER NOT NULL DEFAULT 0'],
+      ['evaluations', 'model_meta', "TEXT NOT NULL DEFAULT '{}'"],
+      ['evaluations', 'settings_snapshot', "TEXT NOT NULL DEFAULT ''"],
+      ['examples', 'family', "TEXT NOT NULL DEFAULT ''"],
+      ['run_examples', 'family', "TEXT NOT NULL DEFAULT ''"],
+      ['feedback_events', 'request_hash', "TEXT NOT NULL DEFAULT ''"],
+      ['feedback_events', 'normalized_text', "TEXT NOT NULL DEFAULT ''"],
+    ])
+      if (
+        !ctx.storage.sql
+          .exec(`PRAGMA table_info('${table}')`)
+          .toArray()
+          .some((c) => c.name === column)
+      )
+        ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     // Additive schema upgrades preserve existing local and deployed data.
     if (
       !ctx.storage.sql

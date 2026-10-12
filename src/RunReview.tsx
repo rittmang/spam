@@ -3,6 +3,7 @@ import { Check, ChevronLeft, ChevronRight, LoaderCircle, Search, Shield } from '
 import type { Evaluation, Label } from '../shared/types';
 import { comparableRuns, reviewedExamples } from '../shared/review';
 import { labelKey } from './label-edits';
+import { FeedbackEditor } from './FeedbackEditor';
 
 type Filter =
   'all' | 'flagged' | 'disagreements' | 'unlabelled' | 'false-positive' | 'false-negative';
@@ -12,12 +13,16 @@ export function RunReview({
   threshold,
   onLabel,
   savingLabels,
+  chatId,
+  onFeedbackSaved,
 }: {
   run: Evaluation;
   runs: Evaluation[];
   threshold: number;
   onLabel: (runId: string, id: string, label: Label) => Promise<void>;
   savingLabels: ReadonlySet<string>;
+  chatId: string;
+  onFeedbackSaved: (id: string, label: Label) => void;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
@@ -41,8 +46,9 @@ export function RunReview({
     .map((example, index) => {
       const predictions = byRun.map((m) => m.get(example.id));
       const scores = predictions.flatMap((p) => (p ? [p.score] : []));
-      const flagged = scores.some((s) => s >= threshold);
-      const disagreement = flagged && scores.some((s) => s < threshold);
+      const flagged = predictions.some((p) => p && !p.needs_review && p.score >= threshold);
+      const disagreement =
+        flagged && predictions.some((p) => p && (p.needs_review || p.score < threshold));
       return { example, index, predictions, scores, flagged, disagreement };
     })
     .filter((row) => {
@@ -57,7 +63,10 @@ export function RunReview({
       if (filter === 'unlabelled') return row.example.label === null;
       if (filter === 'false-positive') return row.example.label === 'ham' && row.flagged;
       if (filter === 'false-negative')
-        return row.example.label === 'spam' && row.scores.some((s) => s < threshold);
+        return (
+          row.example.label === 'spam' &&
+          row.predictions.some((p) => p && (p.needs_review || p.score < threshold))
+        );
       return true;
     })
     .sort((a, b) =>
@@ -85,7 +94,9 @@ export function RunReview({
       <div className="review-models">
         {candidates.map((r) => {
           const active = !excluded.includes(r.id);
-          const flagged = r.predictions.filter((p) => p.score >= threshold).length;
+          const flagged = r.predictions.filter(
+            (p) => !p.needs_review && p.score >= threshold,
+          ).length;
           return (
             <button
               key={r.id}
@@ -213,8 +224,10 @@ export function RunReview({
                           <strong className={p.score >= threshold ? 'red' : 'review-low-score'}>
                             {(p.score * 100).toFixed(1)}%
                           </strong>
-                          <span className={`tag ${p.score >= threshold ? 'review-spam-tag' : ''}`}>
-                            {p.score >= threshold ? 'Spam' : 'Allowed'}
+                          <span
+                            className={`tag ${!p.needs_review && p.score >= threshold ? 'review-spam-tag' : ''}`}
+                          >
+                            {p.needs_review ? 'Review' : p.score >= threshold ? 'Spam' : 'Allowed'}
                           </span>
                           <p title={p.reason}>
                             {/^(Jev|Decision model) policy probability/.test(p.reason)
@@ -249,6 +262,15 @@ export function RunReview({
                         <Shield size={13} />
                         Spam
                       </button>
+                      <button
+                        aria-label={`Review message ${row.example.id} needs context`}
+                        aria-pressed={row.example.label === 'review'}
+                        className={row.example.label === 'review' ? 'selected' : ''}
+                        disabled={savingLabels.has(labelKey(run.dataset_id, row.example.id))}
+                        onClick={() => void onLabel(run.id, row.example.id, 'review')}
+                      >
+                        Needs context
+                      </button>
                     </div>
                     {savingLabels.has(labelKey(run.dataset_id, row.example.id)) ? (
                       <LoaderCircle
@@ -268,6 +290,15 @@ export function RunReview({
                     ) : (
                       <small>Not labelled</small>
                     )}
+                    <FeedbackEditor
+                      key={`${run.id}:${row.example.id}:feedback`}
+                      chatId={chatId}
+                      endpoint={`/evaluations/${run.id}/reviews`}
+                      id={row.example.id}
+                      label={row.example.label}
+                      disabled={savingLabels.has(labelKey(run.dataset_id, row.example.id))}
+                      onSaved={(label) => onFeedbackSaved(row.example.id, label)}
+                    />
                   </td>
                 </tr>
               ))}

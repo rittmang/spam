@@ -6,10 +6,11 @@ export const IMPORT_BATCH_BYTES = 900_000;
 export const exampleSchema = z.object({
   id: z.string().min(1).max(120),
   text: z.string().min(1).max(8000),
-  label: z.enum(['spam', 'ham']).nullable().default(null),
+  label: z.enum(['spam', 'ham', 'review']).nullable().default(null),
   userId: z.string().max(100).optional(),
   context: z.array(z.string().max(2000)).max(5).optional(),
   media: z.string().max(30).optional(),
+  family: z.string().max(100).optional(),
 });
 export const object = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -64,7 +65,7 @@ export function telegramNormalizer() {
     const example = exampleSchema.parse({
       id: String(m.id),
       text,
-      label: m.label === 'spam' || m.label === 'ham' ? m.label : null,
+      label: ['spam', 'ham', 'review'].includes(String(m.label)) ? m.label : null,
       userId,
       context: previous.slice(-3).map((p) => p.text),
     });

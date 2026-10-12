@@ -1,6 +1,18 @@
 # Deployment status
 
-## Current: image moderation with vision fallback
+## Current: reviewed policy improvement
+
+Worker version `53aca4cf-6299-4150-9752-2b70ad94bcfb`, deployed 2026-10-12, serves frontend `/assets/index-DnKRg8lr.js` and stylesheet `/assets/index-EmwSo8AA.css`. **Policy improvement** is available in the owner dashboard, with reasoned feedback on live messages and saved model results, fixed paired replays, review-aware regression gates, sealed tests, exact owner approval, Observe rollout and version rollback. See [the workflow](policy-improvement.md) for triggers and limitations.
+
+Three fresh reasoned correction families for the same cause queue a draft on the minute schedule. Ordinary labels alone and confirmations do not. Owner policy clarification can queue a draft immediately. Original classification snapshots are captured for new predictions; legacy feedback without the original prediction/decision thresholds is held. Existing labels are not retroactively converted into triggers. Image feedback is held because replay datasets do not retain visual pixels.
+
+The additive migration provisioned the new tables/columns in both existing groups. Saved settings and lab row counts were unchanged: MIT-WPU has 4,947 dataset examples, 150 review labels, six saved runs and 1,200 predictions; the second group's lab remains empty. No production feedback or draft fixture was created. Both groups still use the same Gemini Flash Lite policy in **Enforce**, with the original policy SHA-256 `c120c0767153c2ab43524f25b437ece9e58b7ad6b89c82f737480b3b38ec7f38`. No policy was approved during deployment, no existing labels were changed, and no Telegram test messages or effects were issued.
+
+TypeScript, **212 tests**, the production build, formatting and dry-run deployment passed. Real disposable loopback Postgres tests exercised paired replay, publication in Observe and rollback. Isolated browser checks at 1,280 and 390 pixels verified draft text/diff layout and independent reasoned feedback saves, with empty local provider/bot keys. Production Access-authenticated improvement, overview, saved-run index and full saved-run reads returned 200; the page loaded without an alert. Anonymous API and unverified webhook requests returned 401, the Access hostname redirected anonymous visitors to login, and health returned 200. Observed minute ticks completed successfully without exceptions. Sealed-test visibility is checked in SQL to avoid decoding every historical policy payload in the Worker.
+
+A separate real Gemini provider smoke used five synthetic text cases and three requests, costing $0.0004732. It verified drafting/classification paths; the candidate did not meet the improvement gate and was not published. This was not a production accuracy evaluation. [Smoke report](improvement-provider-smoke.json). Workers billing, PlanetScale plan and Access allowlist are unchanged.
+
+## Previous: image moderation with vision fallback
 
 Worker version `32823c33-8a0e-4f69-8716-3143141411aa`, deployed 2026-10-11, serves frontend `/assets/index-NguPGTrO.js` and stylesheet `/assets/index-D26X8zpT.css`. New photos and supported static image documents are classified together with their captions, including photos without captions. OpenRouter model metadata determines whether the selected model accepts images; text-only models such as Jev use the configurable vision fallback. Failed retrieval, unavailable capabilities, unsupported content, and invalid vision output enter Media review without a strike. The Review filter includes these entries. Budget holds remain queued. The existing policy, thresholds, sender protections, and three-strike rules apply to successful vision decisions.
 

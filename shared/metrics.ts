@@ -8,8 +8,8 @@ export function metrics(examples: Example[], predictions: Prediction[], threshol
     fn = 0;
   for (const example of examples) {
     const p = byId.get(example.id);
-    if (example.label === null || !p) continue;
-    const positive = p.score >= threshold;
+    if (!['spam', 'ham'].includes(example.label || '') || !p) continue;
+    const positive = !p.needs_review && p.score >= threshold;
     if (positive && example.label === 'spam') tp++;
     else if (positive) fp++;
     else if (example.label === 'ham') tn++;

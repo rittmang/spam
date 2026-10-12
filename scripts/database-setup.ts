@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import { initializePostgres, discardLegacyHistory } from '../worker/storage';
 import { PostgresDatabase } from '../worker/database';
-import { initializeDirectory } from '../worker/directory';
+import { initializeDirectory, provision } from '../worker/directory';
+import { defaultSettings } from '../shared/types';
 if (existsSync('.dev.vars')) process.loadEnvFile('.dev.vars');
 let url = process.env.PLANETSCALE_ADMIN_DATABASE_URL || process.env.PLANETSCALE_DATABASE_URL;
 const chatId = process.env.TELEGRAM_CHAT_ID || '-1001255868451';
@@ -38,10 +39,7 @@ try {
     const groups = await db.exec<{ chat_id: string }>(
       `SELECT chat_id FROM ${db.table('watchtower_groups')} WHERE provisioned=1`,
     );
-    for (const group of groups)
-      await db.exec(
-        `ALTER TABLE ${db.forGroup(group.chat_id).table('messages')} ADD COLUMN IF NOT EXISTS image_file_id TEXT NOT NULL DEFAULT ''`,
-      );
+    for (const group of groups) await provision(db.forGroup(group.chat_id), defaultSettings);
   });
 } catch (error) {
   if (error && typeof error === 'object' && 'code' in error && error.code === '42501') {

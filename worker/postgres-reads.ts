@@ -17,7 +17,7 @@ export async function evaluationIndexResponse(db: PostgresDatabase, hidden: stri
     `SELECT COALESCE(jsonb_agg(to_jsonb(r) || jsonb_build_object('snapshot_key',
       md5(COALESCE((SELECT jsonb_agg(jsonb_build_object(
         'id',e.id,'text',e.text,'label',e.label,'userId',e.user_id,
-        'context',e.context::jsonb,'media',e.media) ORDER BY e.position)
+        'context',e.context::jsonb,'media',e.media,'family',e.family) ORDER BY e.position)
         FROM run_examples e WHERE e.run_id=r.id), '[]'::jsonb)::text))
       ORDER BY r.created_at DESC), '[]'::jsonb)::text AS payload
       FROM (SELECT r.* FROM evaluations r WHERE ${where} ORDER BY r.created_at DESC LIMIT 12) r`,
@@ -38,9 +38,9 @@ export async function evaluationPageResponse(
   const examples = section === 'examples';
   const value = examples
     ? `jsonb_build_object('id',e.id,'text',e.text,'label',e.label,'userId',e.user_id,
-        'context',e.context::jsonb,'media',e.media)`
+        'context',e.context::jsonb,'media',e.media,'family',e.family)`
     : `CASE WHEN p.id IS NOT NULL THEN jsonb_build_object('id',p.id,'score',p.score,
-        'category',p.category,'reason',p.reason) END`;
+        'category',p.category,'reason',p.reason,'needs_review',p.needs_review=1) END`;
   const [row] = await db.exec<{ payload: string }>(
     `WITH candidates AS (
       SELECT e.*,${value} AS value FROM run_examples e
@@ -85,10 +85,10 @@ export async function evaluationResponse(db: PostgresDatabase, hidden: string[])
     `SELECT COALESCE(jsonb_agg(to_jsonb(r) || jsonb_build_object(
       'examples', COALESCE((SELECT jsonb_agg(jsonb_build_object(
         'id',e.id,'text',e.text,'label',e.label,'userId',e.user_id,
-        'context',e.context::jsonb,'media',e.media) ORDER BY e.position)
+        'context',e.context::jsonb,'media',e.media,'family',e.family) ORDER BY e.position)
         FROM run_examples e WHERE e.run_id=r.id), '[]'::jsonb),
       'predictions', COALESCE((SELECT jsonb_agg(jsonb_build_object(
-        'id',p.id,'score',p.score,'category',p.category,'reason',p.reason) ORDER BY p.id)
+        'id',p.id,'score',p.score,'category',p.category,'reason',p.reason,'needs_review',p.needs_review=1) ORDER BY p.id)
         FROM predictions p WHERE p.run_id=r.id), '[]'::jsonb),
       'reviewLabels', COALESCE((SELECT jsonb_agg(jsonb_build_object(
         'id',l.id,'label',l.label,'updated_at',l.updated_at) ORDER BY l.id)

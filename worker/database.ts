@@ -70,6 +70,13 @@ export const STORAGE_TABLES = [
   'run_examples',
   'predictions',
   'evaluation_labels',
+  'feedback_events',
+  'policy_drafts',
+  'policy_versions',
+  'improvement_test_families',
+  'policy_reference_sets',
+  'policy_evidence_consumption',
+  'improvement_test_inputs',
 ] as const;
 const QUERY_TABLES = [...STORAGE_TABLES, 'storage_state', 'work_state'];
 
@@ -94,7 +101,8 @@ export function postgresSql(source: string): string {
   if (/^\s*INSERT OR REPLACE INTO predictions\b/i.test(sql))
     sql =
       sql.replace('INSERT OR REPLACE', 'INSERT') +
-      ' ON CONFLICT(run_id,id) DO UPDATE SET score=excluded.score,category=excluded.category,reason=excluded.reason';
+      ' ON CONFLICT(run_id,id) DO UPDATE SET score=excluded.score,category=excluded.category,reason=excluded.reason' +
+      (source.includes('needs_review') ? ',needs_review=excluded.needs_review' : '');
   let result = '',
     index = 0,
     quote = false;

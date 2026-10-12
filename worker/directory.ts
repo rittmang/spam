@@ -64,7 +64,7 @@ export async function initializeDirectory(
   });
 }
 
-async function provision(db: PostgresDatabase, settings: Settings) {
+export async function provision(db: PostgresDatabase, settings: Settings) {
   // The schema is trusted source code; only validated numeric chat IDs form prefixes.
   const tables = [...STORAGE_TABLES, 'work_state'];
   let ddl = POSTGRES_SCHEMA.replace(

@@ -65,13 +65,17 @@ import { EvaluationReader } from './evaluation-load';
 import { api, apiForGroup, download, downloadBlob, setApiGroup } from './api';
 import { GroupManager, GroupSwitcher } from './groups';
 import { streamExamples, type ImportProgress } from '../shared/import-stream';
+import { FeedbackEditor } from './FeedbackEditor';
+import { PolicyImprovement } from './PolicyImprovement';
+import { policyFingerprint } from '../shared/improvement';
 
-type Page = 'overview' | 'messages' | 'users' | 'lab' | 'settings';
+type Page = 'overview' | 'messages' | 'users' | 'lab' | 'improvement' | 'settings';
 const pages: { id: Page; title: string; icon: typeof Shield }[] = [
   { id: 'overview', title: 'Overview', icon: LayoutDashboard },
   { id: 'messages', title: 'Message feed', icon: MessageSquare },
   { id: 'users', title: 'Strike history', icon: Users },
   { id: 'lab', title: 'Model lab', icon: FlaskConical },
+  { id: 'improvement', title: 'Policy improvement', icon: SlidersHorizontal },
   { id: 'settings', title: 'Settings', icon: Settings2 },
 ];
 const number = (n: number) =>
@@ -234,8 +238,10 @@ function GroupWorkspace({
       throw e;
     }
   }, [api]);
-  useVisiblePoll(reload, page === 'lab' || page === 'settings' ? 60_000 : 30_000, (e) =>
-    setError(e.message),
+  useVisiblePoll(
+    reload,
+    page === 'lab' || page === 'settings' || page === 'improvement' ? 60_000 : 30_000,
+    (e) => setError(e.message),
   );
   useEffect(() => {
     if (!toast) return;
@@ -814,6 +820,9 @@ function GroupWorkspace({
                 </>
               )}
               {page === 'lab' && <ModelLab data={data} act={act} />}
+              {page === 'improvement' && (
+                <PolicyImprovement chatId={data.chatId} onPublished={reload} />
+              )}
               {page === 'settings' &&
                 (storageWaiting ? (
                   <Empty icon={Settings2} title="Finish database setup">
@@ -924,8 +933,19 @@ function GroupWorkspace({
                 <option value="">Unlabelled</option>
                 <option value="ham">Legitimate</option>
                 <option value="spam">Spam</option>
+                <option value="review">Needs context / review</option>
               </select>
             </label>
+            <FeedbackEditor
+              key={`feedback:${detail.id}`}
+              chatId={data!.chatId}
+              endpoint={`/messages/${detail.id}/label`}
+              label={detail.label}
+              disabled={busy}
+              onSaved={(label) => {
+                setDetail({ ...detail, label });
+              }}
+            />
             <div className="modal-actions">
               <button
                 className="button secondary"
@@ -1452,23 +1472,7 @@ function ModelLab({ data, act }: { data: Overview; act: Act }) {
         method: 'POST',
         body: JSON.stringify([{ id: example.id, label }]),
       });
-      const edit: LabelEdit = { datasetId, example, label, updatedAt: Date.now() };
-      labelEdits.commit(edit);
-      setRuns((current) => applyReviewLabel(current, edit));
-      if (selectedRef.current === datasetId)
-        setExamples((current) =>
-          current.map((e) => (sameExample(e, example) ? { ...e, label } : e)),
-        );
-      setDatasets((current) =>
-        current.map((d) =>
-          d.id === datasetId
-            ? {
-                ...d,
-                labelled: d.labelled + Number(label !== null) - Number(example.label !== null),
-              }
-            : d,
-        ),
-      );
+      labelSaved(datasetId, example, label);
     } catch (e) {
       setError(
         `Could not confirm the label for message #${example.id}: ${e instanceof Error ? e.message : 'Please retry.'}`,
@@ -1477,6 +1481,23 @@ function ModelLab({ data, act }: { data: Overview; act: Act }) {
       labelEdits.end(datasetId, example.id);
       setSavingLabels(new Set(labelEdits.pending));
     }
+  }
+  function labelSaved(datasetId: string, example: Example, label: Label) {
+    const edit: LabelEdit = { datasetId, example, label, updatedAt: Date.now() };
+    labelEdits.commit(edit);
+    setRuns((current) => applyReviewLabel(current, edit));
+    if (selectedRef.current === datasetId)
+      setExamples((current) => current.map((e) => (sameExample(e, example) ? { ...e, label } : e)));
+    setDatasets((current) =>
+      current.map((d) =>
+        d.id === datasetId
+          ? {
+              ...d,
+              labelled: d.labelled + Number(label !== null) - Number(example.label !== null),
+            }
+          : d,
+      ),
+    );
   }
   const selectedRuns = runs.filter((r) => r.dataset_id === selected);
   const displayRun =
@@ -1791,6 +1812,15 @@ function ModelLab({ data, act }: { data: Overview; act: Act }) {
                         >
                           <Shield size={14} /> Spam
                         </button>
+                        <button
+                          className={e.label === 'review' ? 'selected' : ''}
+                          disabled={savingLabels.has(labelKey(selected, e.id))}
+                          onClick={() =>
+                            void saveLabel(selected, e, e.label === 'review' ? null : 'review')
+                          }
+                        >
+                          Needs context
+                        </button>
                         {savingLabels.has(labelKey(selected, e.id)) && (
                           <LoaderCircle
                             size={13}
@@ -1799,6 +1829,15 @@ function ModelLab({ data, act }: { data: Overview; act: Act }) {
                           />
                         )}
                       </div>
+                      <FeedbackEditor
+                        key={`${selected}:${e.id}:feedback`}
+                        chatId={data.chatId}
+                        endpoint={`/datasets/${selected}/labels`}
+                        id={e.id}
+                        label={e.label}
+                        disabled={savingLabels.has(labelKey(selected, e.id))}
+                        onSaved={(label) => labelSaved(selected, e, label)}
+                      />
                     </div>
                   ))}
                 </div>
@@ -2200,6 +2239,11 @@ function ModelLab({ data, act }: { data: Overview; act: Act }) {
                     runs={selectedRuns}
                     threshold={threshold}
                     savingLabels={savingLabels}
+                    chatId={data.chatId}
+                    onFeedbackSaved={(id, label) => {
+                      const example = reviewedExamples(displayRun).find((e) => e.id === id);
+                      if (example) labelSaved(displayRun.dataset_id, example, label);
+                    }}
                     onLabel={async (runId, id, label) => {
                       const run = runs.find((r) => r.id === runId);
                       const example = run && reviewedExamples(run).find((e) => e.id === id);
@@ -2364,7 +2408,10 @@ function SettingsPage({ data, act, busy }: { data: Overview; act: Act; busy: boo
           void act(async () => {
             const result = await api<Settings>('/settings', {
               method: 'PUT',
-              body: JSON.stringify(settings),
+              body: JSON.stringify({
+                ...settings,
+                expectedPolicyFingerprint: await policyFingerprint(JSON.parse(saved) as Settings),
+              }),
             });
             setSettings(result);
             setSaved(JSON.stringify(result));

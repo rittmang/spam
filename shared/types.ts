@@ -30,7 +30,7 @@ export const settingsSchema = z
   });
 export type Settings = z.infer<typeof settingsSchema>;
 export const defaultSettings: Settings = settingsSchema.parse({});
-export type Label = 'spam' | 'ham' | null;
+export type Label = 'spam' | 'ham' | 'review' | null;
 export interface WatchtowerGroup {
   chat_id: string;
   title: string;
@@ -74,6 +74,7 @@ export interface StoredMessage {
   media: string;
   revision: number;
   image_file_id?: string;
+  classification_snapshot?: string;
 }
 export interface UserState {
   user_id: string;
@@ -105,12 +106,14 @@ export interface Example {
   userId?: string;
   context?: string[];
   media?: string;
+  family?: string;
 }
 export interface Prediction {
   id: string;
   score: number;
   category: string;
   reason: string;
+  needs_review?: boolean;
 }
 export interface Evaluation {
   id: string;
@@ -133,6 +136,7 @@ export interface Evaluation {
   created_at: number;
   policy: string;
   examples: Example[];
+  settings_snapshot?: string;
   predictions: Prediction[];
   reviewLabels?: { id: string; label: Label; updated_at: number }[];
 }

@@ -41,6 +41,13 @@ import { HttpError, json, readJson, databaseQuotaResponse } from './http';
 import { importExamples } from './import';
 import { IMPORT_BATCH_MESSAGES, validateExamples } from '../shared/import';
 import {
+  feedbackSchema,
+  routed,
+  type CorrectionSnapshot,
+  type FeedbackInput,
+} from '../shared/improvement';
+import { ImprovementService } from './improvement';
+import {
   mediaType,
   messageText,
   telegram,
@@ -63,7 +70,7 @@ interface MessageRow extends StoredMessage {
   attempts: number;
   next_at: number;
 }
-const labelSchema = z.enum(['spam', 'ham']).nullable();
+const labelSchema = z.enum(['spam', 'ham', 'review']).nullable();
 const safeError = (e: unknown) => (e instanceof Error ? e.message.slice(0, 300) : 'Unknown error');
 class BudgetError extends Error {
   constructor() {
@@ -87,6 +94,14 @@ export class GroupService {
     protected env: Env,
     private schedule: (delay: number) => Promise<void> = async () => {},
   ) {}
+  private improvement() {
+    return new ImprovementService(
+      this.db,
+      this.env,
+      () => this.settings(),
+      () => this.wake(),
+    );
+  }
   private async rows<T>(sql: string, ...params: (string | number | null)[]): Promise<T[]> {
     return this.db.exec<T>(sql, ...params);
   }
@@ -122,6 +137,19 @@ export class GroupService {
         409,
         'This historical record is still being copied. Use a new or recovered dataset until migration completes.',
       );
+  }
+  private async sealedTestRunIds() {
+    // Inspect the seal in SQL instead of decoding every historical policy payload
+    // or doing a round trip per draft on the free Worker.
+    const expected =
+      this.db.kind === 'planetscale'
+        ? "SELECT d.id AS draft_id,x.value AS run_id FROM policy_drafts d CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d.payload::jsonb->'runs'->'test','[]'::jsonb)) x"
+        : "SELECT d.id AS draft_id,x.value AS run_id FROM policy_drafts d,json_each(d.payload,'$.runs.test') x";
+    const rows = await this.rows<{ id: string }>(`WITH expected AS (${expected}), sealed AS (
+      SELECT e.draft_id FROM expected e LEFT JOIN evaluations r ON r.id=e.run_id
+      GROUP BY e.draft_id HAVING COUNT(r.id)<COUNT(*) OR SUM(CASE WHEN r.status='complete' THEN 1 ELSE 0 END)<COUNT(*)
+    ) SELECT e.run_id AS id FROM expected e JOIN sealed s ON s.draft_id=e.draft_id`);
+    return rows.map((row) => row.id);
   }
   private async log(kind: string, detail: string, userId = '', messageId: number | null = null) {
     if (this.db instanceof PostgresDatabase && !(await migrationState(this.db)).ready) return;
@@ -210,7 +238,7 @@ export class GroupService {
       );
       await this.db.exec(
         `INSERT INTO messages (id,user_id,user_name,text,sent_at,status,media,image_file_id,telegram_revision,next_at) VALUES (?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET text=excluded.text,status=excluded.status,media=excluded.media,image_file_id=excluded.image_file_id,telegram_revision=excluded.telegram_revision,revision=messages.revision+1,score=NULL,reason='',category='',model='',attempts=0,next_at=excluded.next_at`,
+        ON CONFLICT(id) DO UPDATE SET text=excluded.text,status=excluded.status,media=excluded.media,image_file_id=excluded.image_file_id,telegram_revision=excluded.telegram_revision,revision=messages.revision+1,score=NULL,reason='',category='',model='',classification_snapshot='',attempts=0,next_at=excluded.next_at`,
         m.message_id,
         userId,
         name,
@@ -295,6 +323,31 @@ export class GroupService {
       usage.cost,
       usage.cost,
       usage.requestId,
+      id,
+    );
+    const row = await this.one<{ model_meta: string }>(
+      'SELECT model_meta FROM evaluations WHERE id=?',
+      id,
+    );
+    const meta = JSON.parse(row?.model_meta || '{}') as {
+      models?: string[];
+      providers?: string[];
+      missing?: boolean;
+    };
+    await this.db.exec(
+      'UPDATE evaluations SET model_meta=? WHERE id=?',
+      JSON.stringify({
+        models: [
+          ...new Set([...(meta.models || []), ...(usage.actualModel ? [usage.actualModel] : [])]),
+        ],
+        providers: [
+          ...new Set([
+            ...(meta.providers || []),
+            ...(usage.actualProvider ? [usage.actualProvider] : []),
+          ]),
+        ],
+        missing: Boolean(meta.missing || !usage.actualModel || !usage.actualProvider),
+      }),
       id,
     );
   }
@@ -493,7 +546,32 @@ export class GroupService {
         const prediction = result.results.find((p) => p.id === String(m.id))!;
         const current = await this.one<MessageRow>('SELECT * FROM messages WHERE id=?', m.id);
         if (!current || current.revision !== m.revision || current.status !== 'pending') continue;
-        if (settings.mode === 'enforce' && prediction.score >= settings.threshold) {
+        const captured = examples.find((e) => e.id === String(m.id))!;
+        await this.db.exec(
+          "UPDATE messages SET classification_snapshot=? WHERE id=? AND revision=? AND status='pending'",
+          JSON.stringify({
+            example: {
+              id: captured.id,
+              text: captured.text,
+              label: captured.label,
+              context: captured.context,
+              media: captured.media,
+              userId: captured.userId,
+            },
+            prediction,
+            policy: settings.policy,
+            settings: { ...settings, provider: route.provider, model: route.model },
+            model: { provider: route.provider, model: route.model },
+            action: { status: m.status, deleted: m.deleted, strikeAwarded: m.strike_awarded },
+          } satisfies CorrectionSnapshot),
+          m.id,
+          m.revision,
+        );
+        if (
+          settings.mode === 'enforce' &&
+          !prediction.needs_review &&
+          prediction.score >= settings.threshold
+        ) {
           // Recheck before allocating a strike; a lookup failure leaves the message pending.
           if (await this.isProtected(m.user_id)) {
             await this.db.exec(
@@ -511,8 +589,9 @@ export class GroupService {
             settings.policy,
           );
         } else {
-          const status =
-            prediction.score >= settings.threshold
+          const status = prediction.needs_review
+            ? 'review'
+            : prediction.score >= settings.threshold
               ? 'observed_spam'
               : prediction.score >= settings.reviewThreshold
                 ? 'review'
@@ -666,7 +745,7 @@ export class GroupService {
       await this.rows<{
         id: string;
         text: string;
-        label: 'spam' | 'ham' | null;
+        label: 'spam' | 'ham' | 'review' | null;
         user_id: string;
         context: string;
         media: string;
@@ -682,10 +761,11 @@ export class GroupService {
     rows: {
       id: string;
       text: string;
-      label: 'spam' | 'ham' | null;
+      label: 'spam' | 'ham' | 'review' | null;
       user_id: string;
       context: string;
       media: string;
+      family?: string;
     }[],
   ): Example[] {
     return rows.map((e) => ({
@@ -695,6 +775,7 @@ export class GroupService {
       userId: e.user_id,
       context: JSON.parse(e.context),
       media: e.media,
+      family: e.family || undefined,
     }));
   }
   private async datasetMeta(id: string) {
@@ -725,7 +806,7 @@ export class GroupService {
   ) {
     const field = table === 'examples' ? 'dataset_id' : 'run_id';
     await this.db.exec(
-      `INSERT INTO ${table} (${field},id,position,text,label,user_id,context,media) VALUES (?,?,?,?,?,?,?,?)`,
+      `INSERT INTO ${table} (${field},id,position,text,label,user_id,context,media,family) VALUES (?,?,?,?,?,?,?,?,?)`,
       id,
       e.id,
       position,
@@ -734,6 +815,7 @@ export class GroupService {
       e.userId || '',
       JSON.stringify(e.context || []),
       e.media || '',
+      e.family || '',
     );
   }
   private async insertExamples(
@@ -752,7 +834,7 @@ export class GroupService {
     for (let start = 0; start < examples.length; start += 250) {
       const batch = examples.slice(start, start + 250);
       await this.db.exec(
-        `INSERT INTO ${table} (${field},id,position,text,label,user_id,context,media) VALUES ${batch.map(() => '(?,?,?,?,?,?,?,?)').join(',')}`,
+        `INSERT INTO ${table} (${field},id,position,text,label,user_id,context,media,family) VALUES ${batch.map(() => '(?,?,?,?,?,?,?,?,?)').join(',')}`,
         ...batch.flatMap((e, i) => [
           id,
           e.id,
@@ -762,6 +844,7 @@ export class GroupService {
           e.userId || '',
           JSON.stringify(e.context || []),
           e.media || '',
+          e.family || '',
         ]),
       );
     }
@@ -774,7 +857,9 @@ export class GroupService {
       context: string;
       media: string;
     },
-    label: 'spam' | 'ham' | null,
+    label: 'spam' | 'ham' | 'review' | null,
+    feedback?: FeedbackInput,
+    snapshot?: CorrectionSnapshot,
   ) {
     await this.db.exec(
       'INSERT INTO evaluation_labels (dataset_id,id,text,context,media,label,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(dataset_id,id) DO UPDATE SET text=excluded.text,context=excluded.context,media=excluded.media,label=excluded.label,updated_at=excluded.updated_at',
@@ -787,7 +872,7 @@ export class GroupService {
       Date.now(),
     );
     const source = await this.one<{
-      label: 'spam' | 'ham' | null;
+      label: 'spam' | 'ham' | 'review' | null;
     }>(
       'SELECT label FROM examples WHERE dataset_id=? AND id=? AND text=? AND context=? AND media=?',
       datasetId,
@@ -809,6 +894,24 @@ export class GroupService {
         datasetId,
       );
     }
+    const settings = await this.settings();
+    await this.improvement().record(
+      `dataset:${datasetId}:${example.id}`,
+      snapshot || {
+        example: {
+          id: example.id,
+          text: example.text,
+          label,
+          context: JSON.parse(example.context),
+          media: example.media,
+        },
+        prediction: null,
+        policy: settings.policy,
+        settings,
+        action: { status: 'label_only' },
+      },
+      feedback || feedbackSchema.parse({ label }),
+    );
   }
   private async processEvaluation() {
     const hidden = await this.hiddenLabIds('run');
@@ -861,12 +964,13 @@ export class GroupService {
         if (!current || current.status === 'cancelled' || current.cursor !== run.cursor) return;
         for (const p of result.results)
           await this.db.exec(
-            'INSERT OR REPLACE INTO predictions (run_id,id,score,category,reason) VALUES (?,?,?,?,?)',
+            'INSERT OR REPLACE INTO predictions (run_id,id,score,category,reason,needs_review) VALUES (?,?,?,?,?,?)',
             run.id,
             p.id,
             p.score,
             p.category,
             p.reason,
+            Number(Boolean(p.needs_review)),
           );
         const cursor = run.cursor + examples.length;
         await this.db.exec(
@@ -900,6 +1004,7 @@ export class GroupService {
           await this.processMessages();
           await this.processActions();
           await this.processEvaluation();
+          await this.improvement().process();
         } catch (e) {
           if (this.db.kind === 'planetscale') throw e;
           if (databaseQuotaResponse(e)) {
@@ -920,7 +1025,8 @@ export class GroupService {
         `SELECT 1 AS due WHERE
         (?!='paused' AND EXISTS(SELECT 1 FROM messages WHERE status='pending' AND next_at<=?)) OR
         (?='enforce' AND EXISTS(SELECT 1 FROM actions WHERE status='pending' AND next_at<=?)) OR
-        EXISTS(SELECT 1 FROM evaluations WHERE status IN ('queued','running'))`,
+        EXISTS(SELECT 1 FROM evaluations WHERE status IN ('queued','running')) OR
+        EXISTS(SELECT 1 FROM policy_drafts WHERE status IN ('queued','drafting','development','validation','test'))`,
         settings.mode,
         Date.now(),
         settings.mode,
@@ -949,7 +1055,7 @@ export class GroupService {
           )?.at
         : null;
     const run = await this.one(
-      "SELECT id FROM evaluations WHERE status IN ('queued','running') LIMIT 1",
+      "SELECT id FROM evaluations WHERE status IN ('queued','running') UNION ALL SELECT id FROM policy_drafts WHERE status IN ('queued','drafting','development','validation','test') LIMIT 1",
     );
     const due = [nextMessage, nextAction, run ? Date.now() : null].filter(
       (n): n is number => n !== null && n !== undefined,
@@ -1117,6 +1223,10 @@ export class GroupService {
         return json({ ok: true });
       }
       if (path === '/api/overview' && request.method === 'GET') return json(await this.overview());
+      if (path.startsWith('/api/improvement')) {
+        await this.requireLiveStorage();
+        return (await this.improvement().handle(request))!;
+      }
       if (path === '/api/images/check' && request.method === 'POST') {
         const saved = await this.settings();
         const draft = z
@@ -1147,7 +1257,11 @@ export class GroupService {
         });
       }
       if (path === '/api/settings' && request.method === 'PUT') {
-        const settings = settingsSchema.parse(await readJson(request));
+        const raw = await readJson(request);
+        const settings = settingsSchema.parse(raw);
+        const { expectedPolicyFingerprint } = z
+          .object({ expectedPolicyFingerprint: z.string().length(64).optional() })
+          .parse(raw);
         if (!publicProviders(this.env).some((p) => p.id === settings.provider))
           throw new HttpError(400, 'Unknown provider.');
         if (!publicProviders(this.env).some((p) => p.id === settings.imageProvider))
@@ -1157,10 +1271,21 @@ export class GroupService {
             throw new HttpError(400, 'Configure the bot token and owner Telegram ID first.');
           configuredProvider(this.env, settings.provider);
         }
-        const previous = await this.settings(),
-          previousMode = previous.mode;
         await this.db.transaction(async () => {
+          const previous = await this.settings(),
+            previousMode = previous.mode;
+          if (
+            expectedPolicyFingerprint &&
+            (await this.improvement().rememberVersion(previous)) !== expectedPolicyFingerprint
+          )
+            throw new HttpError(
+              409,
+              'The policy changed in another tab. Refresh before saving settings.',
+            );
+          // Record the old/new policy versions independently of settings audit retention.
+          await this.improvement().rememberVersion(previous);
           await this.db.exec('UPDATE config SET value=? WHERE id=1', JSON.stringify(settings));
+          await this.improvement().rememberVersion(settings);
           if (previousMode === 'paused' && settings.mode !== 'paused') {
             await this.db.exec(
               "UPDATE messages SET status=CASE WHEN text!='' OR (?=1 AND image_file_id!='') THEN 'pending' ELSE 'unsupported' END,next_at=0 WHERE status='paused'",
@@ -1244,10 +1369,31 @@ export class GroupService {
       if (messagePath && request.method === 'POST') {
         const id = Number(messagePath[1]);
         if (messagePath[2] === 'label') {
-          const { label } = z.object({ label: labelSchema }).parse(await readJson(request));
-          if (!(await this.one('SELECT id FROM messages WHERE id=?', id)))
-            throw new HttpError(404, 'Message not found.');
-          await this.db.exec('UPDATE messages SET label=? WHERE id=?', label, id);
+          const body = feedbackSchema.parse(await readJson(request)),
+            { label } = body;
+          const message = await this.one<MessageRow>('SELECT * FROM messages WHERE id=?', id);
+          if (!message) throw new HttpError(404, 'Message not found.');
+          const settings = await this.settings();
+          const snapshot: CorrectionSnapshot = message.classification_snapshot
+            ? JSON.parse(message.classification_snapshot)
+            : {
+                example: (await this.examplesFor([message]))[0],
+                prediction: null,
+                policy: settings.policy,
+                settings,
+                action: { status: message.status },
+              };
+          snapshot.action = {
+            status: message.status,
+            deleted: message.deleted,
+            strikeAwarded: message.strike_awarded,
+          };
+          const result = await this.db.transaction(async () => {
+            const result = await this.improvement().record(`live:${id}`, snapshot, body);
+            await this.db.exec('UPDATE messages SET label=? WHERE id=?', label, id);
+            return result;
+          });
+          return json({ ok: true, ...result });
         } else if (messagePath[2] === 'retry') {
           const settings = await this.settings();
           await this.db.exec(
@@ -1512,7 +1658,7 @@ export class GroupService {
       const datasetLabel = path.match(/^\/api\/datasets\/([\w-]+)\/labels$/);
       if (datasetLabel && request.method === 'POST') {
         const labels = z
-          .array(z.object({ id: z.string().max(120), label: labelSchema }))
+          .array(feedbackSchema.extend({ id: z.string().max(120) }))
           .max(10000)
           .parse(await readJson(request));
         await this.db.transaction(async () => {
@@ -1528,7 +1674,7 @@ export class GroupService {
               l.id,
             );
             if (!previous) continue;
-            await this.saveReviewLabel(datasetLabel[1], previous, l.label);
+            await this.saveReviewLabel(datasetLabel[1], previous, l.label, l);
           }
         });
         return json({ ok: true });
@@ -1546,6 +1692,8 @@ export class GroupService {
       }
       const pagePath = path.match(/^\/api\/evaluations\/([\w-]+)\/(examples|results)$/);
       if (pagePath && request.method === 'GET') {
+        if ((await this.sealedTestRunIds()).includes(pagePath[1]))
+          throw new HttpError(409, 'The sealed test remains hidden until both frozen runs finish.');
         const { offset, limit } = z
           .object({
             offset: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
@@ -1579,7 +1727,7 @@ export class GroupService {
         return json({
           predictions: ids.length
             ? await this.rows<Prediction>(
-                `SELECT id,score,category,reason FROM predictions WHERE run_id=? AND id IN (${placeholders})`,
+                `SELECT id,score,category,reason,needs_review FROM predictions WHERE run_id=? AND id IN (${placeholders})`,
                 run.id,
                 ...ids,
               )
@@ -1598,7 +1746,7 @@ export class GroupService {
         });
       }
       if (path === '/api/evaluations' && request.method === 'GET') {
-        const hidden = await this.hiddenLabIds('run');
+        const hidden = [...(await this.hiddenLabIds('run')), ...(await this.sealedTestRunIds())];
         if (this.db instanceof PostgresDatabase) return await evaluationResponse(this.db, hidden);
         const runs = await this.rows<Evaluation>(
           `SELECT * FROM evaluations WHERE ${excludeIds('id', hidden)} ORDER BY created_at DESC LIMIT 12`,
@@ -1610,7 +1758,7 @@ export class GroupService {
               ...r,
               examples: await this.decodedExamples('run_examples', 'run_id', r.id),
               predictions: await this.rows<Prediction>(
-                'SELECT id,score,category,reason FROM predictions WHERE run_id=?',
+                'SELECT id,score,category,reason,needs_review FROM predictions WHERE run_id=?',
                 r.id,
               ),
               reviewLabels: await this.rows(
@@ -1625,7 +1773,7 @@ export class GroupService {
       const reviewPath = path.match(/^\/api\/evaluations\/([\w-]+)\/reviews$/);
       if (reviewPath && request.method === 'POST') {
         const labels = z
-          .array(z.object({ id: z.string().min(1).max(120), label: labelSchema }))
+          .array(feedbackSchema.extend({ id: z.string().min(1).max(120) }))
           .min(1)
           .max(250)
           .parse(await readJson(request));
@@ -1634,6 +1782,11 @@ export class GroupService {
           reviewPath[1],
         );
         if (!run) throw new HttpError(404, 'Run not found.');
+        if (run.dataset_id.startsWith('policy:'))
+          throw new HttpError(
+            409,
+            'Policy replay references are frozen. Correct the original message or dataset, then create a new draft.',
+          );
         if (new Set(labels.map((l) => l.id)).size !== labels.length)
           throw new HttpError(400, 'Each message may be labelled once per request.');
         const examples = await Promise.all(
@@ -1649,12 +1802,34 @@ export class GroupService {
               l.id,
             );
             if (!example) throw new HttpError(400, 'A review message is not in this saved sample.');
-            return { example, label: l.label };
+            return { example, label: l.label, feedback: l };
           }),
         );
         await this.db.transaction(async () => {
-          for (const item of examples)
-            await this.saveReviewLabel(run.dataset_id, item.example, item.label);
+          for (const item of examples) {
+            const prediction = await this.one<Prediction>(
+              'SELECT id,score,category,reason,needs_review FROM predictions WHERE run_id=? AND id=?',
+              run.id,
+              item.example.id,
+            );
+            const settings = run.settings_snapshot
+              ? (JSON.parse(run.settings_snapshot) as Settings)
+              : null;
+            await this.saveReviewLabel(run.dataset_id, item.example, item.label, item.feedback, {
+              example: {
+                id: item.example.id,
+                text: item.example.text,
+                label: item.label,
+                context: JSON.parse(item.example.context),
+                media: item.example.media,
+              },
+              prediction: prediction || null,
+              policy: run.policy,
+              settings,
+              model: { provider: run.provider, model: run.model },
+              action: { status: 'label_only' },
+            });
+          }
         });
         return json({ ok: true });
       }
@@ -1692,7 +1867,7 @@ export class GroupService {
             const id = crypto.randomUUID();
             ids.push(id);
             await this.db.exec(
-              "INSERT INTO evaluations (id,dataset_id,dataset_name,provider,model,policy,status,total,created_at) VALUES (?,?,?,?,?,?,'queued',?,?)",
+              "INSERT INTO evaluations (id,dataset_id,dataset_name,provider,model,policy,status,total,created_at,settings_snapshot) VALUES (?,?,?,?,?,?,'queued',?,?,?)",
               id,
               body.datasetId,
               dataset.name,
@@ -1701,6 +1876,12 @@ export class GroupService {
               body.policy || (await this.settings()).policy,
               examples.length,
               Date.now(),
+              JSON.stringify({
+                ...(await this.settings()),
+                policy: body.policy || (await this.settings()).policy,
+                provider: model.provider,
+                model: model.model,
+              }),
             );
             await this.insertExamples('run_examples', id, examples);
           }

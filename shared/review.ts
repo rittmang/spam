@@ -10,6 +10,7 @@ export function sameExample(a: Example, b: Example) {
     a.id === b.id &&
     a.text === b.text &&
     (a.media || '') === (b.media || '') &&
+    (a.family || '') === (b.family || '') &&
     JSON.stringify(a.context || []) === JSON.stringify(b.context || [])
   );
 }

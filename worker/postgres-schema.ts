@@ -1,3 +1,4 @@
+import { IMPROVEMENT_SCHEMA } from './improvement-schema';
 export const POSTGRES_SCHEMA = `
       CREATE TABLE IF NOT EXISTS work_state (id BIGINT PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', expires_at BIGINT NOT NULL DEFAULT 0, last_run_at BIGINT NOT NULL DEFAULT 0);
       INSERT INTO work_state (id) VALUES (1) ON CONFLICT DO NOTHING;
@@ -11,6 +12,7 @@ export const POSTGRES_SCHEMA = `
         revision BIGINT NOT NULL DEFAULT 1, telegram_revision BIGINT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0, next_at BIGINT NOT NULL DEFAULT 0
       );
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_file_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS classification_snapshot TEXT NOT NULL DEFAULT '';
       CREATE INDEX IF NOT EXISTS messages_sender ON messages(user_id, sent_at);
       CREATE INDEX IF NOT EXISTS messages_pending ON messages(status, next_at);
       CREATE INDEX IF NOT EXISTS messages_recent ON messages(sent_at DESC,id DESC);
@@ -22,13 +24,18 @@ export const POSTGRES_SCHEMA = `
       CREATE TABLE IF NOT EXISTS dataset_stats (id TEXT PRIMARY KEY, count BIGINT NOT NULL, labelled BIGINT NOT NULL);
       CREATE TABLE IF NOT EXISTS examples (dataset_id TEXT NOT NULL, id TEXT NOT NULL, position BIGINT NOT NULL, text TEXT NOT NULL, label TEXT, user_id TEXT, context TEXT NOT NULL, media TEXT NOT NULL, PRIMARY KEY(dataset_id,id));
       CREATE INDEX IF NOT EXISTS examples_position ON examples(dataset_id,position);
+      ALTER TABLE examples ADD COLUMN IF NOT EXISTS family TEXT NOT NULL DEFAULT '';
       CREATE TABLE IF NOT EXISTS dataset_imports (id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'uploading', count BIGINT NOT NULL DEFAULT 0, chunks BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL);
       CREATE TABLE IF NOT EXISTS dataset_import_chunks (dataset_id TEXT NOT NULL, sequence BIGINT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(dataset_id,sequence));
       CREATE TABLE IF NOT EXISTS evaluations (id TEXT PRIMARY KEY, dataset_id TEXT NOT NULL, dataset_name TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, cursor BIGINT NOT NULL DEFAULT 0, total BIGINT NOT NULL, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, usage_estimated BIGINT NOT NULL DEFAULT 0, latency_ms BIGINT NOT NULL DEFAULT 0, cost DOUBLE PRECISION, cost_complete BIGINT NOT NULL DEFAULT 1, error TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, batch_size BIGINT NOT NULL DEFAULT 20, provider_request_id TEXT, usage_incomplete BIGINT NOT NULL DEFAULT 0);
+      ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS model_meta TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS settings_snapshot TEXT NOT NULL DEFAULT '';
       CREATE TABLE IF NOT EXISTS run_examples (run_id TEXT NOT NULL, id TEXT NOT NULL, position BIGINT NOT NULL, text TEXT NOT NULL, label TEXT, user_id TEXT, context TEXT NOT NULL, media TEXT NOT NULL, PRIMARY KEY(run_id,id));
       CREATE INDEX IF NOT EXISTS run_examples_position ON run_examples(run_id,position);
+      ALTER TABLE run_examples ADD COLUMN IF NOT EXISTS family TEXT NOT NULL DEFAULT '';
       CREATE INDEX IF NOT EXISTS evaluations_recent ON evaluations(created_at DESC);
       CREATE INDEX IF NOT EXISTS evaluations_active ON evaluations(status,created_at);
       CREATE TABLE IF NOT EXISTS predictions (run_id TEXT NOT NULL, id TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, category TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(run_id,id));
+      ALTER TABLE predictions ADD COLUMN IF NOT EXISTS needs_review BIGINT NOT NULL DEFAULT 0;
       CREATE TABLE IF NOT EXISTS evaluation_labels (dataset_id TEXT NOT NULL, id TEXT NOT NULL, text TEXT NOT NULL, context TEXT NOT NULL, media TEXT NOT NULL, label TEXT, updated_at BIGINT NOT NULL, PRIMARY KEY(dataset_id,id));
-    `;
+    ${IMPROVEMENT_SCHEMA}`;

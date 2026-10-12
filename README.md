@@ -21,6 +21,7 @@ For this workspace's configured hostname, current deployment state, and remainin
 - Telegram Desktop JSON imports, captured-message datasets, editable human labels, and durable model comparisons.
 - Precision, recall, F1, false positives, usage, total model-call latency, provider-reported cost, threshold curves, and saved run exports.
 - Labels save independently per message. Other messages and pagination remain usable while a save is pending; matching run metrics update locally without reloading every saved prediction. Save errors identify the affected message, and stale refresh responses cannot undo newer successful saves.
+- Reasoned corrections create bounded policy drafts, with fixed-model development/validation/sealed-test replays, exact owner approval, an Observe rollout, and version rollback. See [Policy improvement](docs/policy-improvement.md) for triggers, gates and limits.
 - Model lab loads saved runs in pages bounded by message count and JSON size. Models with identical original samples share a cached snapshot; scores and human labels refresh from Postgres. Postgres assembles response JSON and overview data to reduce Worker CPU. Dashboard reads retry transient failures without replaying mutations. The Workers Free plan still has a 10 ms CPU allowance; cold requests and larger jobs can still exceed it. See [Worker limits](https://developers.cloudflare.com/workers/platform/limits/).
 
 ### Telegram differences from the screenshot
