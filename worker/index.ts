@@ -140,7 +140,12 @@ export function createWorker(
         if (url.pathname === '/api/groups' || url.pathname.startsWith('/api/groups/'))
           return securityHeaders(await resolveDirectory(env).fetch(request));
         if (url.pathname.startsWith('/api/')) {
-          const chatId = request.headers.get('X-Watchtower-Group') || env.TELEGRAM_CHAT_ID;
+          const chatId =
+            request.headers.get('X-Watchtower-Group') ||
+            (/^\/api\/messages\/\d+\/image$/.test(url.pathname)
+              ? url.searchParams.get('group')
+              : null) ||
+            env.TELEGRAM_CHAT_ID;
           if (!/^-100\d+$/.test(chatId)) throw new HttpError(400, 'Invalid group selection.');
           const directory = resolveDirectory(env);
           return await directory.session(async () => {

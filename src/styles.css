@@ -671,6 +671,15 @@ h1 {
   white-space: nowrap;
   transition: background 0.15s;
 }
+.message-image {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 10px;
+  background: #f7f8f4;
+  margin: 16px 0;
+}
 .button.secondary {
   border: 1px solid #dce2d3;
   background: #fcfdf9;
@@ -2398,6 +2407,15 @@ tbody tr:last-child td {
 .settings-panel > .field {
   margin: 0 21px 21px;
 }
+.settings-image-footer {
+  padding: 0 21px 21px;
+}
+.settings-image-footer > p {
+  margin: 0 0 14px;
+}
+.settings-image-footer > button {
+  margin-bottom: 12px;
+}
 .mode-options {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -3261,6 +3279,10 @@ tbody tr:last-child td {
   .settings-panel > .field {
     margin-left: 16px;
     margin-right: 16px;
+  }
+  .settings-image-footer {
+    padding-left: 16px;
+    padding-right: 16px;
   }
   .mode-options {
     grid-template-columns: 1fr;

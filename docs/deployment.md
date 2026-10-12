@@ -1,6 +1,18 @@
 # Deployment status
 
-## Current: aligned group setup buttons
+## Current: image moderation with vision fallback
+
+Worker version `32823c33-8a0e-4f69-8716-3143141411aa`, deployed 2026-10-11, serves frontend `/assets/index-NguPGTrO.js` and stylesheet `/assets/index-D26X8zpT.css`. New photos and supported static image documents are classified together with their captions, including photos without captions. OpenRouter model metadata determines whether the selected model accepts images; text-only models such as Jev use the configurable vision fallback. Failed retrieval, unavailable capabilities, unsupported content, and invalid vision output enter Media review without a strike. The Review filter includes these entries. Budget holds remain queued. The existing policy, thresholds, sender protections, and three-strike rules apply to successful vision decisions.
+
+The additive `image_file_id` upgrade completed for both provisioned groups. Immediately after migration, every existing application table had an identical row count and content fingerprint when excluding the new empty column. Saved settings were not rewritten; they inherit the new image defaults on read. The original 4,947 examples, 150 review labels, six runs, and 1,200 predictions remain unchanged. Live traffic continued after deployment. Neither the schema upgrade nor connection checks posted a Telegram message, changed settings, or created moderation actions. Production still uses PlanetScale and the free Worker, with no new credentials or billing-plan change.
+
+All **121 tests** passed, including **22 real loopback Postgres tests**, plus TypeScript, formatting and the production build. Tests exercise direct Gemini routing, Jev fallback, capability checks, credential isolation, stream size limits, MIME/path validation, chronological strikes, duplicates, image edits, stale in-flight decisions, sender exemptions, paid invalid outputs, budget holds, restart/pause recovery, image previews, cross-group isolation, and repeatable schema setup. Browser checks covered the new controls, unsaved routing tests, disabled states, previews, and 390-pixel layout.
+
+Two backend connection checks and two authenticated checks through the deployed Worker succeeded for direct Gemini and Jev's Gemini fallback. All four used only the built-in geometric PNG and reported 1,044 input plus 33 output tokens each, totaling 4,308 live tokens and **$0.0004704**. These verify connectivity and output mapping, not model accuracy. Cloudflare tail reported `ok` with zero exceptions for both live vision requests, plus successful cron, webhook and internal group-work invocations. Owner verification still reports **Enforce**, threshold **0.90**, and zero spam, deletions or bans. Anonymous image and connection-check requests return 401; health returns 200.
+
+Settings now includes **Image moderation** and **Check vision connection**. The connection check does not save settings or create strikes. Image previews use the authenticated dashboard endpoint, and Telegram's download token never reaches the model or browser. Photos select a bounded Telegram rendition when available; files above 512 KB enter review. Model lab remains text/caption-only, and older messages without captured file IDs are not automatically reclassified. See [Image moderation](../README.md#image-moderation).
+
+## Previous: aligned group setup buttons
 
 Worker version `8ca92dc6-a3f9-46b5-b82e-64ed35d80624`, deployed 2026-10-11, serves frontend `/assets/index-65PFAY4h.js` and stylesheet `/assets/index-DzURgCFo.css`. The shared `.button` class now centers icons and text with consistent spacing, including the Add bot link. Previously those layout rules applied only to HTML buttons.
 

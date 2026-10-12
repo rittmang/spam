@@ -54,8 +54,15 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('Postgres backend in Workers runtime', (
         const url = String(input),
           body = JSON.parse(String(init?.body || '{}'));
         if (url.startsWith('https://api.telegram.org/')) {
+          if (url.includes('/file/'))
+            return new Response(new Uint8Array([255, 216, 255, 224, 0, 16]));
           const method = url.split('/').at(-1)!;
           calls.push({ method, body });
+          if (method === 'getFile')
+            return Response.json({
+              ok: true,
+              result: { file_path: 'photos/test.jpg', file_size: 6 },
+            });
           if (method === 'getChatAdministrators')
             return Response.json({ ok: true, result: admins.map((id) => ({ user: { id } })) });
           if (method === 'getChatMember')
@@ -63,8 +70,11 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('Postgres backend in Workers runtime', (
           return Response.json({ ok: true, result: true });
         }
         if (url.startsWith('https://openrouter.ai/')) {
+          if (url.endsWith('/endpoints'))
+            return Response.json({ data: { architecture: { input_modalities: ['image'] } } });
           calls.push({ method: 'classify', body });
-          const messages = JSON.parse(body.messages[1].content).messages;
+          const content = body.messages[1].content;
+          const messages = JSON.parse(Array.isArray(content) ? content[0].text : content).messages;
           return Response.json({
             choices: [
               {
@@ -150,6 +160,39 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('Postgres backend in Workers runtime', (
     expect(calls.filter((c) => c.method === 'classify')).toHaveLength(3);
     const feed = await get<{ total: number }>(s, '/api/messages?search=signals');
     expect(feed.total).toBe(3);
+  });
+  it('preserves image metadata, classifications, settings and strikes when schema setup is rerun', async () => {
+    const s = stub();
+    await enforce(s);
+    const photo = update(1);
+    delete photo.message!.text;
+    photo.message!.photo = [{ file_id: 'postgres-image', width: 640, height: 640 }];
+    await request(s, '/ingest', photo);
+    await request(s, '/ingest', photo);
+    await tick();
+    const before = await get<Overview>(s, '/api/overview');
+    expect(before.messages[0]).toMatchObject({
+      status: 'spam',
+      image_file_id: 'postgres-image',
+      strike_awarded: 1,
+      model: 'openrouter:google/gemini-2.5-flash-lite',
+    });
+    expect(before.users[0].strikes).toBe(1);
+    await initializePostgres(env, true);
+    const after = await get<Overview>(stub(), '/api/overview');
+    expect(after.settings).toEqual(before.settings);
+    expect(after.messages).toEqual(before.messages);
+    expect(after.users).toEqual(before.users);
+    expect(calls.filter((c) => c.method === 'classify')).toHaveLength(1);
+    await db.exec(
+      "INSERT INTO messages (id,user_id,user_name,text,sent_at,status,telegram_revision,image_file_id) VALUES (2,'42','Member','',1,'unsupported',1,'unavailable-image')",
+    );
+    const review = await get<{ total: number; messages: { id: number; status: string }[] }>(
+      s,
+      '/api/messages?status=review',
+    );
+    expect(review.total).toBe(1);
+    expect(review.messages[0]).toMatchObject({ id: 2, status: 'unsupported' });
   });
   it('does not send owner or administrator messages to models', async () => {
     const s = stub();

@@ -7,6 +7,9 @@ export const settingsSchema = z
     mode: z.enum(['observe', 'enforce', 'paused']).default('observe'),
     provider: z.string().min(1).max(60).default('openrouter'),
     model: z.string().min(1).max(200).default('google/gemini-2.5-flash-lite'),
+    imageModeration: z.boolean().default(true),
+    imageProvider: z.string().min(1).max(60).default('openrouter'),
+    imageModel: z.string().max(200).default('google/gemini-2.5-flash-lite'),
     threshold: z.number().min(0.5).max(1).default(0.9),
     reviewThreshold: z.number().min(0).max(1).default(0.6),
     batchSeconds: z.number().int().min(1).max(60).default(10),
@@ -70,6 +73,7 @@ export interface StoredMessage {
   label: Label;
   media: string;
   revision: number;
+  image_file_id?: string;
 }
 export interface UserState {
   user_id: string;

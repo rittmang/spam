@@ -315,7 +315,8 @@ export class GroupDirectory implements Directory {
         await provision(db, settings);
         await db.exec('UPDATE config SET value=? WHERE id=1', JSON.stringify(settings));
         await db.exec(
-          "UPDATE messages SET status=CASE WHEN text='' THEN 'unsupported' ELSE 'pending' END,next_at=0 WHERE status='paused'",
+          "UPDATE messages SET status=CASE WHEN text!='' OR (?=1 AND image_file_id!='') THEN 'pending' ELSE 'unsupported' END,next_at=0 WHERE status='paused'",
+          Number(settings.imageModeration),
         );
         await this.db.exec(
           `UPDATE ${this.table} SET status='active',provisioned=1,activated_at=COALESCE(activated_at,?) WHERE chat_id=?`,

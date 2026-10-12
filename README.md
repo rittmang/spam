@@ -16,6 +16,7 @@ For this workspace's configured hostname, current deployment state, and remainin
 - Strike three: permanently ban with `revoke_messages: true`.
 - Editable spam policy, model, thresholds, batch window, token budget, retention, and exempt IDs.
 - OpenRouter chat-completions for Gemini and other models, a dedicated **Jev Decisions API** adapter, and custom OpenAI-compatible endpoints.
+- Image moderation with automatic vision routing, a configurable fallback for text-only models, private image previews, and a connection check that creates no strikes.
 - Owner-only dashboard, message review, manual strikes, reset/unban, retry controls, audit log, and export.
 - Telegram Desktop JSON imports, captured-message datasets, editable human labels, and durable model comparisons.
 - Precision, recall, F1, false positives, usage, total model-call latency, provider-reported cost, threshold curves, and saved run exports.
@@ -26,7 +27,7 @@ For this workspace's configured hostname, current deployment state, and remainin
 
 The Bot API does **not** expose Telegram's native **Report Spam** action or a group-history export method. Watchtower records spam internally; it does not send a platform spam report. Strike two can only purge messages the bot has tracked and that Telegram allows it to delete, generally under 48 hours old. Strike three uses the supergroup ban operation, which revokes the user's history. Historical imports are evaluation data and never trigger live moderation. [Telegram Bot API](https://core.telegram.org/bots/api#deletemessage), [banChatMember](https://core.telegram.org/bots/api#banchatmember).
 
-Text, captions, poll questions, and hidden message links are classified. Uncaptioned images, stickers, voice notes, and other media are retained for **manual review**; this version does not perform OCR, image analysis, or transcription. Anonymous admins, channel senders, bots, the owner, and known administrators are exempt. A failed administrator lookup prevents enforcement.
+Text, captions, poll questions, and hidden message links are classified. With image processing enabled, photos and JPEG/PNG/WebP image documents are inspected together with their captions, including photos without captions. Unsupported or unavailable images and failed vision checks enter **Media review** without a strike. Videos, animations, stickers, and voice notes are not inspected; available captions are still classified. This version does not transcribe audio or analyze video. Anonymous admins, channel senders, bots, the owner, and known administrators are exempt. A failed administrator lookup prevents enforcement.
 
 ## Run locally
 
@@ -203,6 +204,20 @@ The default policy catches scams, unsolicited promotion, phishing, and disruptiv
 
 Repetition context includes up to three prior messages from the same sender within ten minutes. Telegram Desktop imports use the same time window; if timestamps are missing, no recent burst is inferred. Normalized datasets may supply explicit context for controlled experiments.
 
+### Image moderation
+
+Settings → **Image moderation** enables image inspection by default. Watchtower first checks whether the selected model accepts images. If it does, that model sees the image and caption together. Otherwise, it uses the configured **Vision fallback provider/model**. Jev's text-only Decisions adapter always uses this fallback for images; ordinary text continues through Jev. Clearing the fallback model sends unsupported image requests to review. Both routes use the existing live policy, score thresholds, sender protections, and three-strike ledger. The feed records the actual model used.
+
+OpenRouter capabilities come from its small, model-specific metadata endpoint and are cached for an hour. A custom compatible provider must declare its image-capable model IDs using `imageModels` in `MODEL_PROVIDERS_JSON`; an unknown capability never results in silently discarding the image. [OpenRouter image inputs](https://openrouter.ai/blog/tutorials/send-image-to-llm/).
+
+Only a Telegram file ID is persisted. The Worker retrieves image bytes through `getFile`, verifies a JPEG/PNG/WebP signature, and supplies an inline base64 image to the provider. Telegram's credential-bearing download URL is never sent to the model or browser. Image previews pass through the same owner authentication and group selection as other dashboard data. Photos use the largest Telegram rendition within 1,280 pixels and 512 KB when available. Downloads are limited to 512 KB, even without a content length. Larger or unsupported images enter review. Each vision request contains one image; ordinary text retains batching. [Telegram file retrieval](https://core.telegram.org/bots/api#getfile).
+
+Image usage counts toward the existing live moderation budget. Reservations include 4,096 tokens per image instead of counting its base64 transport as text, and settle against reported usage. A budget hold stays queued until reset or a budget increase; it does not issue a strike. Provider failures and invalid output go to review with an explicit **Recheck** control, and paid usage is recorded even for invalid output. Image replacements invalidate older in-flight decisions.
+
+**Check vision connection** uses a small built-in geometric image with the current model choices. It makes a real provider call and records live usage, but changes no settings and creates no message, strike, deletion, or ban. It verifies connectivity and output mapping, not model accuracy. Model lab imports and captured datasets still compare **text and captions only**; importing Telegram's JSON does not upload the export's local photo files.
+
+For an existing installation, run `npm run database:setup` before deploying this version. The additive upgrade adds `image_file_id` to every provisioned group's messages table and preserves settings, strikes, datasets, labels, and runs. Older saved settings inherit the new defaults without rewriting their policy or enforcement mode. Older messages lack file IDs and are not automatically reclassified.
+
 Built-in adapters:
 
 | Provider          | Credential           | Example model                  | API                        |
@@ -225,7 +240,8 @@ To add or override a custom endpoint, store a JSON array as the `MODEL_PROVIDERS
     "name": "My compatible provider",
     "baseUrl": "https://provider.example/v1",
     "apiKeyEnv": "CUSTOM_API_KEY",
-    "format": "json_object"
+    "format": "json_object",
+    "imageModels": ["your-vision-model-id"]
   }
 ]
 ```

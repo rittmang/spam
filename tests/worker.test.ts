@@ -22,6 +22,7 @@ let nextScore = 0.99,
   memberStatus = 'member',
   deleteFailures = 0;
 let modelReply: ((body: Record<string, any>) => Promise<Response> | Response) | null;
+let imageReply: (() => Promise<Response> | Response) | null;
 beforeEach(() => {
   calls = [];
   nextScore = 0.99;
@@ -29,14 +30,26 @@ beforeEach(() => {
   memberStatus = 'member';
   deleteFailures = 0;
   modelReply = null;
+  imageReply = null;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input),
         body = JSON.parse(String(init?.body || '{}'));
       if (url.startsWith('https://api.telegram.org/')) {
+        if (url.includes('/file/')) {
+          calls.push({ method: 'image-download', body: {} });
+          return imageReply
+            ? imageReply()
+            : new Response(new Uint8Array([255, 216, 255, 224, 0, 16]));
+        }
         const method = url.split('/').at(-1)!;
         calls.push({ method, body });
+        if (method === 'getFile')
+          return Response.json({
+            ok: true,
+            result: { file_path: 'photos/test.jpg', file_size: 6 },
+          });
         if (method === 'getChatAdministrators')
           return Response.json({ ok: true, result: admins.map((id) => ({ user: { id } })) });
         if (method === 'getChatMember')
@@ -51,9 +64,19 @@ beforeEach(() => {
         return Response.json({ ok: true, result: true });
       }
       if (url.startsWith('https://openrouter.ai/')) {
+        if (url.endsWith('/endpoints'))
+          return Response.json({ data: { architecture: { input_modalities: ['text', 'image'] } } });
         calls.push({ method: 'classify', body });
         if (modelReply) return modelReply(body);
-        const messages = JSON.parse(body.messages[1].content).messages;
+        if (body.state)
+          return Response.json({
+            answers: Object.fromEntries(
+              Object.keys(body.questions).map((id) => [id, { type: 'noul', noul: nextScore }]),
+            ),
+            usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 },
+          });
+        const content = body.messages[1].content;
+        const messages = JSON.parse(Array.isArray(content) ? content[0].text : content).messages;
         return Response.json({
           choices: [
             {
@@ -361,8 +384,9 @@ describe('durable moderation', () => {
     expect((await overview(s)).stats.total).toBe(0);
     expect((await overview(s)).users[0].strikes).toBe(1);
   });
-  it('keeps uncaptioned media for review and ignores other groups', async () => {
+  it('keeps uncaptioned media for review when images are disabled and ignores other groups', async () => {
     const s = stub();
+    await configure(s, { imageModeration: false });
     const m = update(1);
     delete m.message!.text;
     m.message!.photo = [{ file_id: 'image' }];
@@ -379,6 +403,276 @@ describe('durable moderation', () => {
     await send(s, update(1));
     expect((await overview(s)).messages[0].status).toBe('paused');
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('live image moderation', () => {
+  function photo(id: number, user = 42, caption = '') {
+    const m = update(id, user);
+    delete m.message!.text;
+    m.message!.photo = [{ file_id: `image-${id}`, width: 640, height: 640, file_size: 6 }];
+    if (caption) m.message!.caption = caption;
+    return m;
+  }
+  it('checks the real vision adapter without creating a message, strike, or settings change', async () => {
+    const s = stub();
+    const before = (await overview(s)).settings;
+    const r = await s.fetch('https://group.internal/api/images/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'jev', model: 'typesafe/jev-1.13' }),
+    });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({
+      provider: 'openrouter',
+      model: defaultSettings.imageModel,
+      inputTokens: 100,
+    });
+    const after = await overview(s);
+    expect(after.settings).toEqual(before);
+    expect(after.stats).toMatchObject({ total: 0, spam: 0, deleted: 0, banned: 0, tokens: 150 });
+    expect(after.audit).toHaveLength(0);
+    expect(calls.some((c) => c.method === 'deleteMessages')).toBe(false);
+  });
+  it('checks image content without a caption and preserves normal three-strike enforcement and deduplication', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    for (let i = 1; i <= 3; i++) {
+      await send(s, photo(i));
+      await send(s, photo(i));
+      await tick(s);
+    }
+    const data = await overview(s);
+    expect(data.stats).toMatchObject({ spam: 3, deleted: 3, banned: 1 });
+    expect(data.users[0].strikes).toBe(3);
+    expect(calls.filter((c) => c.method === 'classify')).toHaveLength(3);
+    expect(calls.filter((c) => c.method === 'banChatMember')).toHaveLength(1);
+    const body = calls.find((c) => c.method === 'classify')!.body;
+    expect(body.messages[1].content.at(-1).image_url.url).toBe('data:image/jpeg;base64,/9j/4AAQ');
+    expect(JSON.stringify(body)).not.toContain('test-token');
+    expect(data.messages.every((m) => m.model === 'openrouter:google/gemini-2.5-flash-lite')).toBe(
+      true,
+    );
+    expect(data.stats.tokens).toBe(450);
+  });
+  it('judges an image and innocent caption together, and leaves harmless images allowed', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    nextScore = 0.05;
+    await send(s, photo(1, 42, 'Hello there'));
+    await tick(s);
+    expect((await overview(s)).messages[0].status).toBe('allowed');
+    const body = calls.find((c) => c.method === 'classify')!.body;
+    expect(JSON.parse(body.messages[1].content[0].text).messages[0].text).toBe('Hello there');
+    expect(body.messages[1].content.some((p: any) => p.type === 'image_url')).toBe(true);
+    expect(calls.some((c) => c.method === 'deleteMessages')).toBe(false);
+  });
+  it('uses Gemini for Jev images and records the actual vision model', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce', provider: 'jev', model: 'typesafe/jev-1.13' });
+    await send(s, photo(1, 42, 'A question'));
+    await tick(s);
+    const body = calls.find((c) => c.method === 'classify')!.body;
+    expect(body.model).toBe(defaultSettings.imageModel);
+    expect(body.state).toBeUndefined();
+    expect((await overview(s)).messages[0].model).toBe(`openrouter:${defaultSettings.imageModel}`);
+  });
+  it('keeps a mixed text and image sequence chronological when switching models', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce', provider: 'jev', model: 'typesafe/jev-1.13' });
+    await send(s, update(1));
+    await send(s, photo(2));
+    await send(s, update(3));
+    await tick(s);
+    await tick(s);
+    await tick(s);
+    expect(calls.filter((c) => c.method === 'classify').map((c) => c.body.model)).toEqual([
+      'typesafe/jev-1.13',
+      defaultSettings.imageModel,
+      'typesafe/jev-1.13',
+    ]);
+    const strikes = (await overview(s)).audit.filter((a) => a.kind === 'spam').reverse();
+    expect(strikes.map((a) => a.message_id)).toEqual([1, 2, 3]);
+  });
+  it('sends missing vision fallback and image download failures to review without a strike', async () => {
+    const s = stub();
+    await configure(s, {
+      mode: 'enforce',
+      provider: 'jev',
+      model: 'typesafe/jev-1.13',
+      imageModel: '',
+    });
+    await send(s, photo(1));
+    await tick(s);
+    let data = await overview(s);
+    expect(data.messages[0]).toMatchObject({
+      status: 'unsupported',
+      score: null,
+      strike_awarded: 0,
+      category: 'image_review',
+    });
+    expect(data.messages[0].reason).toContain('No verified vision model');
+    const review = (await (
+      await s.fetch('https://group.internal/api/messages?status=review')
+    ).json()) as { messages: { status: string }[]; total: number };
+    expect(review.total).toBe(1);
+    expect(review.messages[0].status).toBe('unsupported');
+    expect(calls.some((c) => c.method === 'classify' || c.method === 'getFile')).toBe(false);
+    await configure(s, { mode: 'enforce' });
+    imageReply = () => {
+      throw new Error('private Telegram URL /bottest-token/photo');
+    };
+    await send(s, photo(2));
+    await tick(s);
+    data = await overview(s);
+    expect(data.messages[0].status).toBe('unsupported');
+    expect(JSON.stringify(data)).not.toContain('test-token');
+    expect(calls.some((c) => c.method === 'deleteMessages')).toBe(false);
+    expect(data.users).toHaveLength(0);
+  });
+  it('accounts for paid invalid image outputs but never strikes, and permits an explicit retry', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    modelReply = () =>
+      Response.json({
+        choices: [{ message: { content: '{"results":[]}' } }],
+        usage: { prompt_tokens: 333, completion_tokens: 12, cost: 0.00001 },
+      });
+    await send(s, photo(1));
+    await tick(s);
+    expect((await overview(s)).messages[0].status).toBe('unsupported');
+    expect((await overview(s)).stats.tokens).toBe(345);
+    expect((await overview(s)).users).toHaveLength(0);
+    modelReply = null;
+    const r = await s.fetch('https://group.internal/api/messages/1/retry', { method: 'POST' });
+    expect(r.ok).toBe(true);
+    await tick(s);
+    expect((await overview(s)).users[0].strikes).toBe(1);
+  });
+  it('skips image downloads and model calls for the owner, administrators and other protected senders', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    admins = [42];
+    await send(s, photo(1, 42));
+    await send(s, photo(2, Number(env.OWNER_TELEGRAM_ID)));
+    await tick(s);
+    expect((await overview(s)).messages.every((m) => m.status === 'protected')).toBe(true);
+    expect(calls.some((c) => c.method === 'getFile' || c.method === 'classify')).toBe(false);
+  });
+  it('retains image metadata across a restart and resumes paused uncaptioned photos', async () => {
+    let s = stub();
+    await configure(s, { mode: 'paused' });
+    await send(s, photo(1));
+    await abortAllDurableObjects();
+    s = env.GROUPS.get(s.id);
+    expect((await overview(s)).messages[0]).toMatchObject({
+      image_file_id: 'image-1',
+      status: 'paused',
+    });
+    await configure(s, { mode: 'observe' });
+    await tick(s);
+    expect((await overview(s)).messages[0].status).toBe('observed_spam');
+    expect((await overview(s)).users).toHaveLength(0);
+  });
+  it('treats an image replacement with an unchanged caption as a new revision', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    const original = photo(1, 42, 'Same caption');
+    nextScore = 0.05;
+    await send(s, original);
+    await tick(s);
+    const replacement = {
+      update_id: 2,
+      edited_message: {
+        ...original.message!,
+        photo: [{ file_id: 'replacement', width: 640, height: 640 }],
+        edit_date: original.message!.date,
+      },
+    };
+    nextScore = 0.99;
+    await send(s, replacement);
+    await tick(s);
+    expect((await overview(s)).messages[0]).toMatchObject({
+      revision: 2,
+      image_file_id: 'replacement',
+      strike_awarded: 1,
+    });
+    await send(s, replacement);
+    await tick(s);
+    expect((await overview(s)).users[0].strikes).toBe(1);
+  });
+  it('holds image work without downloads or strikes when the moderation budget is exhausted', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce', dailyTokenBudget: 1000 });
+    await send(s, photo(1));
+    await tick(s);
+    expect((await overview(s)).messages[0]).toMatchObject({ status: 'pending', strike_awarded: 0 });
+    expect(calls.some((c) => c.method === 'getFile' || c.method === 'classify')).toBe(false);
+  });
+  it('checks supported image documents but does not inspect video thumbnails or animations', async () => {
+    const s = stub();
+    const document = update(1);
+    delete document.message!.text;
+    document.message!.document = { file_id: 'document', mime_type: 'image/png' };
+    const video = update(2);
+    delete video.message!.text;
+    video.message!.video = { file_id: 'video', thumbnail: { file_id: 'thumbnail' } };
+    await send(s, document);
+    await send(s, video);
+    await tick(s);
+    const data = await overview(s);
+    expect(data.messages.find((m) => m.id === 1)!.status).toBe('observed_spam');
+    expect(data.messages.find((m) => m.id === 2)!.status).toBe('unsupported');
+    expect(calls.filter((c) => c.method === 'classify')).toHaveLength(1);
+  });
+  it('serves image previews through the group service and rejects anonymous public image requests', async () => {
+    const s = stub();
+    await send(s, photo(1));
+    const r = await s.fetch('https://group.internal/api/messages/1/image');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('Content-Type')).toBe('image/jpeg');
+    expect(r.headers.get('Cache-Control')).toBe('no-store');
+    expect(new Uint8Array(await r.arrayBuffer())).toHaveLength(6);
+    const anonymous = await worker.fetch(
+      new Request('https://bot.example/api/messages/1/image?group=-1001234567890'),
+      { ...env, ACCESS_TEAM_DOMAIN: 'https://test.cloudflareaccess.com', ACCESS_AUD: 'audience' },
+    );
+    expect(anonymous.status).toBe(401);
+  });
+  it('discards a vision decision when the image changes while the provider is responding', async () => {
+    const s = stub();
+    await configure(s, { mode: 'enforce' });
+    await send(s, photo(1));
+    await runInDurableObject(s, async (instance: GroupModerator, state) => {
+      modelReply = () => {
+        state.storage.sql.exec(
+          "UPDATE messages SET image_file_id='replacement',revision=revision+1 WHERE id=1",
+        );
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  results: [{ id: 'm0', score: 0.99, category: 'spam', reason: 'Old image' }],
+                }),
+              },
+            },
+          ],
+          usage: { prompt_tokens: 200, completion_tokens: 20 },
+        });
+      };
+      await instance.alarm();
+    });
+    expect((await overview(s)).messages[0]).toMatchObject({
+      revision: 2,
+      status: 'pending',
+      strike_awarded: 0,
+    });
+    expect(calls.some((c) => c.method === 'deleteMessages')).toBe(false);
+    modelReply = null;
+    nextScore = 0.05;
+    await tick(s);
+    expect((await overview(s)).messages[0].status).toBe('allowed');
   });
 });
 

@@ -12,7 +12,7 @@ import type { TelegramUpdate } from '../worker/telegram';
 describe.skipIf(!env.TEST_POSTGRES_URL)('group onboarding and isolation in Postgres', () => {
   let db: PostgresDatabase, directory: GroupDirectory;
   let botRights: boolean, ownerAdmin: boolean;
-  let effects: { method: string; chat: string }[];
+  let effects: { method: string; chat: string; file?: string }[];
   const second = '-1009876543210',
     third = '-1009876543211',
     botId = 123;
@@ -41,8 +41,19 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('group onboarding and isolation in Postg
         const url = String(input),
           body = JSON.parse(String(init?.body || '{}'));
         if (url.startsWith('https://api.telegram.org/')) {
+          if (url.includes('/file/'))
+            return new Response(new Uint8Array([255, 216, 255, 224, 0, 16]));
           const method = url.split('/').at(-1)!;
-          effects.push({ method, chat: String(body.chat_id || '') });
+          effects.push({
+            method,
+            chat: String(body.chat_id || ''),
+            ...(method === 'getFile' ? { file: body.file_id } : {}),
+          });
+          if (method === 'getFile')
+            return Response.json({
+              ok: true,
+              result: { file_path: 'photos/test.jpg', file_size: 6 },
+            });
           if (method === 'getMe')
             return Response.json({ ok: true, result: { id: botId, username: 'test_bot' } });
           if (method === 'getChat')
@@ -340,6 +351,38 @@ describe.skipIf(!env.TEST_POSTGRES_URL)('group onboarding and isolation in Postg
       }),
     );
     expect((await post('/api/groups/-123456789/activate', {})).status).toBe(409);
+  });
+  it('keeps image previews isolated when message IDs overlap across groups', async () => {
+    await directory.discover(membership());
+    await activate();
+    for (const [chatId, file] of [
+      [env.TELEGRAM_CHAT_ID, 'primary-image'],
+      [second, 'secondary-image'],
+    ])
+      await db
+        .forGroup(chatId)
+        .exec(
+          "INSERT INTO messages (id,user_id,user_name,text,sent_at,status,telegram_revision,image_file_id) VALUES (1,'42','Member','',1,'unsupported',1,?)",
+          file,
+        );
+    for (const chatId of [second, env.TELEGRAM_CHAT_ID]) {
+      const r = await worker.fetch(
+        new Request(`http://127.0.0.1/api/messages/1/image?group=${chatId}`),
+        env,
+      );
+      expect(r.status).toBe(200);
+      await r.arrayBuffer();
+    }
+    expect(effects.filter((e) => e.method === 'getFile').map((e) => e.file)).toEqual([
+      'secondary-image',
+      'primary-image',
+    ]);
+    const unknown = await worker.fetch(
+      new Request('http://127.0.0.1/api/messages/1/image?group=-1005555555555'),
+      env,
+    );
+    expect(unknown.status).toBe(404);
+    expect(effects.filter((e) => e.method === 'getFile')).toHaveLength(2);
   });
   it('authenticates internal work and dispatches each active group separately while excluding pending groups', async () => {
     await directory.discover(membership());

@@ -7,9 +7,10 @@ export const POSTGRES_SCHEMA = `
       CREATE TABLE IF NOT EXISTS messages (
         id BIGINT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT NOT NULL, text TEXT NOT NULL, sent_at BIGINT NOT NULL,
         status TEXT NOT NULL, score DOUBLE PRECISION, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
-        strike_awarded BIGINT NOT NULL DEFAULT 0, deleted BIGINT NOT NULL DEFAULT 0, label TEXT, media TEXT NOT NULL DEFAULT '',
+        strike_awarded BIGINT NOT NULL DEFAULT 0, deleted BIGINT NOT NULL DEFAULT 0, label TEXT, media TEXT NOT NULL DEFAULT '', image_file_id TEXT NOT NULL DEFAULT '',
         revision BIGINT NOT NULL DEFAULT 1, telegram_revision BIGINT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0, next_at BIGINT NOT NULL DEFAULT 0
       );
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_file_id TEXT NOT NULL DEFAULT '';
       CREATE INDEX IF NOT EXISTS messages_sender ON messages(user_id, sent_at);
       CREATE INDEX IF NOT EXISTS messages_pending ON messages(status, next_at);
       CREATE INDEX IF NOT EXISTS messages_recent ON messages(sent_at DESC,id DESC);

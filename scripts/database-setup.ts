@@ -28,14 +28,21 @@ try {
         DEV_MODE: process.env.DEV_MODE || 'false',
       }),
     );
-  await initializeDirectory(
-    new PostgresDatabase({
-      PLANETSCALE_DATABASE_URL: url,
-      TELEGRAM_CHAT_ID: chatId,
-      DEV_MODE: process.env.DEV_MODE || 'false',
-    }),
-    { TELEGRAM_CHAT_ID: chatId },
-  );
+  const db = new PostgresDatabase({
+    PLANETSCALE_DATABASE_URL: url,
+    TELEGRAM_CHAT_ID: chatId,
+    DEV_MODE: process.env.DEV_MODE || 'false',
+  });
+  await initializeDirectory(db, { TELEGRAM_CHAT_ID: chatId });
+  await db.transaction(async () => {
+    const groups = await db.exec<{ chat_id: string }>(
+      `SELECT chat_id FROM ${db.table('watchtower_groups')} WHERE provisioned=1`,
+    );
+    for (const group of groups)
+      await db.exec(
+        `ALTER TABLE ${db.forGroup(group.chat_id).table('messages')} ADD COLUMN IF NOT EXISTS image_file_id TEXT NOT NULL DEFAULT ''`,
+      );
+  });
 } catch (error) {
   if (error && typeof error === 'object' && 'code' in error && error.code === '42501') {
     console.error(

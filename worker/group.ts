@@ -14,6 +14,7 @@ import {
 import { z } from 'zod';
 import {
   settingsSchema,
+  defaultSettings,
   REPETITION_CONTEXT_MS,
   type Dataset,
   type Example,
@@ -31,7 +32,10 @@ import {
   publicProviders,
   ClassificationError,
   type ClassificationUsage,
+  type ClassificationExample,
 } from './classifier';
+import { telegramImageFileId, imageRoute, imageData, telegramImage } from './images';
+import { VISION_CHECK_IMAGE } from './vision-check';
 import type { Env } from './env';
 import { HttpError, json, readJson, databaseQuotaResponse } from './http';
 import { importExamples } from './import';
@@ -90,11 +94,14 @@ export class GroupService {
     return (await this.rows<T>(sql, ...params))[0];
   }
   async settings(): Promise<Settings> {
-    return JSON.parse(
-      (await this.one<{
-        value: string;
-      }>('SELECT value FROM config WHERE id=1'))!.value,
-    );
+    return {
+      ...defaultSettings,
+      ...JSON.parse(
+        (await this.one<{
+          value: string;
+        }>('SELECT value FROM config WHERE id=1'))!.value,
+      ),
+    };
   }
   private async requireLiveStorage() {
     if (this.db instanceof PostgresDatabase && !(await migrationState(this.db)).ready) {
@@ -153,7 +160,8 @@ export class GroupService {
       ? [m.from.first_name, m.from.last_name].filter(Boolean).join(' ')
       : 'Channel / anonymous admin';
     const text = messageText(m),
-      media = mediaType(m);
+      media = mediaType(m),
+      imageFileId = telegramImageFileId(m);
     const protectedSender =
       !m.from ||
       Boolean(m.sender_chat) ||
@@ -176,19 +184,24 @@ export class GroupService {
       if (
         existing &&
         (version < existing.telegram_revision ||
-          (version === existing.telegram_revision && text === existing.text))
+          (version === existing.telegram_revision &&
+            text === existing.text &&
+            imageFileId === existing.image_file_id &&
+            media === existing.media))
       )
         return;
       if (existing?.strike_awarded || existing?.deleted) return;
-      // Ignore non-content service messages. Uncaptioned media stays visible for manual review.
+      // Ignore service messages. Photos with retrievable image content are queued even without captions.
       if (!text && !media) return;
       const status = protectedSender
         ? 'protected'
         : settings.mode === 'paused'
           ? 'paused'
-          : !text
+          : settings.imageModeration && media === 'photo' && !imageFileId
             ? 'unsupported'
-            : 'pending';
+            : !text && !(settings.imageModeration && imageFileId)
+              ? 'unsupported'
+              : 'pending';
       await this.db.exec(
         `INSERT INTO users (user_id,name,last_seen) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name,last_seen=excluded.last_seen`,
         userId,
@@ -196,8 +209,8 @@ export class GroupService {
         m.date * 1000,
       );
       await this.db.exec(
-        `INSERT INTO messages (id,user_id,user_name,text,sent_at,status,media,telegram_revision,next_at) VALUES (?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET text=excluded.text,status=excluded.status,media=excluded.media,telegram_revision=excluded.telegram_revision,revision=messages.revision+1,score=NULL,reason='',attempts=0,next_at=excluded.next_at`,
+        `INSERT INTO messages (id,user_id,user_name,text,sent_at,status,media,image_file_id,telegram_revision,next_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET text=excluded.text,status=excluded.status,media=excluded.media,image_file_id=excluded.image_file_id,telegram_revision=excluded.telegram_revision,revision=messages.revision+1,score=NULL,reason='',category='',model='',attempts=0,next_at=excluded.next_at`,
         m.message_id,
         userId,
         name,
@@ -205,6 +218,7 @@ export class GroupService {
         m.date * 1000,
         status,
         media,
+        imageFileId,
         version,
         this.db.kind === 'planetscale' ? Date.now() + settings.batchSeconds * 1000 : 0,
       );
@@ -288,7 +302,7 @@ export class GroupService {
     provider: string,
     model: string,
     policy: string,
-    examples: Example[],
+    examples: ClassificationExample[],
     runId?: string,
   ) {
     if (!examples.length) throw new BudgetError();
@@ -409,6 +423,10 @@ export class GroupService {
       settings.batchSize,
     );
     if (!messages.length) return;
+    let processing = messages;
+    let route = { provider: settings.provider, model: settings.model };
+    const usesImage = (m: MessageRow) =>
+      settings.imageModeration && (m.media === 'photo' || Boolean(m.image_file_id));
     try {
       // One group-level lookup keeps administrators out of model calls.
       const admins = await telegram<
@@ -436,24 +454,42 @@ export class GroupService {
         } else eligible.push(m);
       }
       if (!eligible.length) return;
+      // Preserve chronological strike allocation. Images use one bounded request;
+      // adjacent text messages keep the existing economical batch path.
+      const image = usesImage(eligible[0]);
+      processing = image
+        ? eligible.slice(0, 1)
+        : eligible.slice(
+            0,
+            eligible.findIndex(usesImage) < 0 ? eligible.length : eligible.findIndex(usesImage),
+          );
+      if (image) {
+        route = await imageRoute(this.env, settings);
+        if (!processing[0].image_file_id)
+          throw new Error('No supported image file is available for this photo.');
+      }
       const examples = fitExamples(
         this.env,
-        settings.provider,
-        settings.model,
+        route.provider,
+        route.model,
         settings.policy,
-        await this.examplesFor(eligible),
+        (await this.examplesFor(processing)).map((e) =>
+          image ? { ...e, image: 'pending-download' } : e,
+        ),
         await this.remainingBudget(),
       );
+      if (image && examples.length)
+        examples[0].image = await imageData(this.env, processing[0].image_file_id!);
       const result = await this.classifyBatch(
-        settings.provider,
-        settings.model,
+        route.provider,
+        route.model,
         settings.policy,
         examples,
       );
       // Config changes during an upstream call invalidate its decisions.
       if (JSON.stringify(await this.settings()) !== JSON.stringify(settings)) return;
       // Model output order must never change the chronology of strikes.
-      for (const m of eligible.filter((m) => examples.some((e) => e.id === String(m.id)))) {
+      for (const m of processing.filter((m) => examples.some((e) => e.id === String(m.id)))) {
         const prediction = result.results.find((p) => p.id === String(m.id))!;
         const current = await this.one<MessageRow>('SELECT * FROM messages WHERE id=?', m.id);
         if (!current || current.revision !== m.revision || current.status !== 'pending') continue;
@@ -471,7 +507,7 @@ export class GroupService {
           await this.awardStrike(
             m,
             prediction,
-            `${settings.provider}:${settings.model}`,
+            `${route.provider}:${route.model}`,
             settings.policy,
           );
         } else {
@@ -487,7 +523,7 @@ export class GroupService {
             prediction.score,
             prediction.reason,
             prediction.category,
-            `${settings.provider}:${settings.model}`,
+            `${route.provider}:${route.model}`,
             m.id,
             m.revision,
           );
@@ -496,7 +532,16 @@ export class GroupService {
     } catch (e) {
       if (e instanceof DatabaseUnavailableError || e instanceof LostWorkLeaseError) throw e;
       const error = safeError(e);
-      for (const m of messages) {
+      for (const m of processing) {
+        if (usesImage(m) && !(e instanceof BudgetError)) {
+          await this.db.exec(
+            "UPDATE messages SET status='unsupported',score=NULL,reason=?,category='image_review' WHERE id=? AND revision=? AND status='pending'",
+            `Image review required: ${error}`,
+            m.id,
+            m.revision,
+          );
+          continue;
+        }
         const attempts = m.attempts + Number(!(e instanceof BudgetError));
         await this.db.exec(
           "UPDATE messages SET attempts=?,next_at=?,reason=?,status=? WHERE id=? AND revision=? AND status='pending'",
@@ -919,6 +964,7 @@ export class GroupService {
       const { state, ...rows } = await overviewRows(this.db, day, Date.now() - 7 * 86400000);
       const value: Omit<Overview, 'dev' | 'owner'> = {
         ...rows,
+        settings: { ...defaultSettings, ...rows.settings },
         providers: publicProviders(this.env),
         chatId: this.env.TELEGRAM_CHAT_ID,
         storage: {
@@ -1071,10 +1117,41 @@ export class GroupService {
         return json({ ok: true });
       }
       if (path === '/api/overview' && request.method === 'GET') return json(await this.overview());
+      if (path === '/api/images/check' && request.method === 'POST') {
+        const saved = await this.settings();
+        const draft = z
+          .object({
+            provider: z.string().min(1).max(60).optional(),
+            model: z.string().min(1).max(200).optional(),
+            imageProvider: z.string().min(1).max(60).optional(),
+            imageModel: z.string().max(200).optional(),
+            imageModeration: z.boolean().optional(),
+          })
+          .parse(await readJson(request));
+        const route = await imageRoute(this.env, { ...saved, ...draft });
+        const result = await this.classifyBatch(route.provider, route.model, saved.policy, [
+          {
+            id: 'vision-check',
+            text: 'Connection check: classify this ordinary geometric illustration.',
+            label: null,
+            media: 'photo',
+            image: VISION_CHECK_IMAGE,
+          },
+        ]);
+        // This verifies the real provider path, never ingestion or enforcement.
+        return json({
+          ...route,
+          inputTokens: result.input,
+          outputTokens: result.output,
+          cost: result.cost,
+        });
+      }
       if (path === '/api/settings' && request.method === 'PUT') {
         const settings = settingsSchema.parse(await readJson(request));
         if (!publicProviders(this.env).some((p) => p.id === settings.provider))
           throw new HttpError(400, 'Unknown provider.');
+        if (!publicProviders(this.env).some((p) => p.id === settings.imageProvider))
+          throw new HttpError(400, 'Unknown image fallback provider.');
         if (settings.mode === 'enforce') {
           if (!this.env.TELEGRAM_BOT_TOKEN || !this.env.OWNER_TELEGRAM_ID)
             throw new HttpError(400, 'Configure the bot token and owner Telegram ID first.');
@@ -1086,7 +1163,8 @@ export class GroupService {
           await this.db.exec('UPDATE config SET value=? WHERE id=1', JSON.stringify(settings));
           if (previousMode === 'paused' && settings.mode !== 'paused') {
             await this.db.exec(
-              "UPDATE messages SET status=CASE WHEN text='' THEN 'unsupported' ELSE 'pending' END,next_at=0 WHERE status='paused'",
+              "UPDATE messages SET status=CASE WHEN text!='' OR (?=1 AND image_file_id!='') THEN 'pending' ELSE 'unsupported' END,next_at=0 WHERE status='paused'",
+              Number(settings.imageModeration),
             );
           }
           if (settings.dailyTokenBudget > previous.dailyTokenBudget) {
@@ -1105,10 +1183,11 @@ export class GroupService {
         const status = url.searchParams.get('status') || '';
         const search = (url.searchParams.get('search') || '').slice(0, 200);
         const where =
-          "WHERE (?='' OR status=?) AND (?='' OR instr(lower(text),lower(?))>0 OR instr(lower(user_name),lower(?))>0)";
+          "WHERE (?='' OR status=? OR (?='review' AND status='unsupported')) AND (?='' OR instr(lower(text),lower(?))>0 OR instr(lower(user_name),lower(?))>0)";
         return json({
           messages: await this.rows(
             `SELECT * FROM messages ${where} ORDER BY sent_at DESC,id DESC LIMIT ? OFFSET ?`,
+            status,
             status,
             status,
             search,
@@ -1121,6 +1200,7 @@ export class GroupService {
             count: number;
           }>(
             `SELECT COUNT(*) AS count FROM messages ${where}`,
+            status,
             status,
             status,
             search,
@@ -1140,6 +1220,26 @@ export class GroupService {
         );
         return json({ messages, nextCursor: messages.length === 500 ? messages.at(-1)!.id : null });
       }
+      const imagePath = path.match(/^\/api\/messages\/(\d+)\/image$/);
+      if (imagePath && request.method === 'GET') {
+        const m = await this.one<MessageRow>(
+          'SELECT * FROM messages WHERE id=?',
+          Number(imagePath[1]),
+        );
+        if (!m?.image_file_id) throw new HttpError(404, 'No captured image is available.');
+        try {
+          const { bytes, mime } = await telegramImage(this.env, m.image_file_id);
+          return new Response(new Uint8Array(bytes), {
+            headers: {
+              'Content-Type': mime,
+              'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff',
+            },
+          });
+        } catch {
+          throw new HttpError(502, 'The image is unavailable from Telegram.');
+        }
+      }
       const messagePath = path.match(/^\/api\/messages\/(\d+)\/(label|moderate|retry)$/);
       if (messagePath && request.method === 'POST') {
         const id = Number(messagePath[1]);
@@ -1149,9 +1249,11 @@ export class GroupService {
             throw new HttpError(404, 'Message not found.');
           await this.db.exec('UPDATE messages SET label=? WHERE id=?', label, id);
         } else if (messagePath[2] === 'retry') {
+          const settings = await this.settings();
           await this.db.exec(
-            "UPDATE messages SET status='pending',attempts=0,next_at=0 WHERE id=? AND strike_awarded=0 AND deleted=0 AND text!=''",
+            "UPDATE messages SET status='pending',score=NULL,reason='',category='',model='',attempts=0,next_at=0 WHERE id=? AND strike_awarded=0 AND deleted=0 AND status!='protected' AND (text!='' OR (?=1 AND image_file_id!=''))",
             id,
+            Number(settings.imageModeration),
           );
           await this.wake();
         } else

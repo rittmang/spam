@@ -22,7 +22,7 @@ export class GroupModerator extends GroupService {
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT NOT NULL, text TEXT NOT NULL, sent_at INTEGER NOT NULL,
         status TEXT NOT NULL, score REAL, reason TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
-        strike_awarded INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, label TEXT, media TEXT NOT NULL DEFAULT '',
+        strike_awarded INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, label TEXT, media TEXT NOT NULL DEFAULT '', image_file_id TEXT NOT NULL DEFAULT '',
         revision INTEGER NOT NULL DEFAULT 1, telegram_revision INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS messages_sender ON messages(user_id, sent_at);
@@ -51,6 +51,15 @@ export class GroupModerator extends GroupService {
       FROM datasets d LEFT JOIN examples e ON e.dataset_id=d.id
       WHERE NOT EXISTS(SELECT 1 FROM dataset_stats s WHERE s.id=d.id) GROUP BY d.id`);
     // Additive schema upgrades preserve existing local and deployed data.
+    if (
+      !ctx.storage.sql
+        .exec("PRAGMA table_info('messages')")
+        .toArray()
+        .some((c) => c.name === 'image_file_id')
+    )
+      ctx.storage.sql.exec(
+        "ALTER TABLE messages ADD COLUMN image_file_id TEXT NOT NULL DEFAULT ''",
+      );
     const evaluationColumns = ctx.storage.sql
       .exec("PRAGMA table_info('evaluations')")
       .toArray()

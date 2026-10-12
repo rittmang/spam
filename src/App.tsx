@@ -874,6 +874,13 @@ function GroupWorkspace({
               <Badge status={detail.status} />
             </div>
             <blockquote>{detail.text || `[${detail.media} without a caption]`}</blockquote>
+            {detail.image_file_id && (
+              <MessageImage
+                key={`${data?.chatId}:${detail.id}:${detail.revision}`}
+                id={detail.id}
+                chatId={data!.chatId}
+              />
+            )}
             <dl>
               <div>
                 <dt>Spam score</dt>
@@ -2319,11 +2326,27 @@ function ThresholdChart({ run, threshold }: { run: Evaluation; threshold: number
   );
 }
 
+function MessageImage({ id, chatId }: { id: number; chatId: string }) {
+  const [failed, setFailed] = useState(false);
+  return failed ? (
+    <p className="field-help">The image is no longer available from Telegram.</p>
+  ) : (
+    <img
+      className="message-image"
+      src={`/api/messages/${id}/image?group=${encodeURIComponent(chatId)}`}
+      alt="Telegram message attachment"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function SettingsPage({ data, act, busy }: { data: Overview; act: Act; busy: boolean }) {
   const api = useMemo(() => apiForGroup(data.chatId), [data.chatId]);
   const [settings, setSettings] = useState<Settings>(data.settings),
     [saved, setSaved] = useState(JSON.stringify(data.settings));
   const [telegramStatus, setTelegramStatus] = useState<unknown>(null);
+  const [checkingImage, setCheckingImage] = useState(false);
+  const [imageCheck, setImageCheck] = useState('');
   const dirty = JSON.stringify(settings) !== saved;
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
     setSettings((s) => ({ ...s, [key]: value }));
@@ -2478,6 +2501,120 @@ function SettingsPage({ data, act, busy }: { data: Overview; act: Act; busy: boo
               />
               <small>Uncertain messages stay visible and enter review.</small>
             </label>
+          </div>
+        </section>
+        <section className="panel settings-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Image moderation</h2>
+              <p>
+                Check photos and image attachments together with their captions using the same spam
+                policy.
+              </p>
+            </div>
+            <ShieldCheck size={20} className="muted" />
+          </div>
+          <div className="fields-grid">
+            <label className="field">
+              Image processing
+              <select
+                value={settings.imageModeration ? 'on' : 'off'}
+                onChange={(e) => update('imageModeration', e.target.value === 'on')}
+              >
+                <option value="on">Enabled · automatic vision routing</option>
+                <option value="off">Disabled · check captions only</option>
+              </select>
+              <small>
+                Uses your selected model when it accepts images. Text-only models, including Jev,
+                use the fallback below.
+              </small>
+            </label>
+            <label className="field">
+              Vision fallback provider
+              <select
+                disabled={!settings.imageModeration}
+                value={settings.imageProvider}
+                onChange={(e) => update('imageProvider', e.target.value)}
+              >
+                {data.providers
+                  .filter((p) => p.format !== 'decisions')
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.configured ? '' : ' · key needed'}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="field">
+              Vision fallback model
+              <input
+                disabled={!settings.imageModeration}
+                value={settings.imageModel}
+                placeholder="Leave empty for manual review"
+                onChange={(e) => update('imageModel', e.target.value)}
+              />
+              <small>
+                Only used when the selected model cannot accept images. An empty fallback sends
+                those images to review.
+              </small>
+            </label>
+            <div className="field">
+              <span>When an image cannot be checked</span>
+              <p className="field-help">
+                Unavailable images, unsupported formats, and failed vision requests go to Media
+                review without a strike. Open a message to view its image and retry.
+              </p>
+            </div>
+          </div>
+          <div className="settings-image-footer">
+            <p className="field-help">
+              JPEG, PNG, and WebP are supported. Videos, animations, and stickers remain outside
+              image inspection. Image usage counts toward your live moderation budget. Model lab
+              imports still compare text and captions.
+            </p>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={checkingImage || !settings.imageModeration}
+              onClick={async () => {
+                setCheckingImage(true);
+                setImageCheck('');
+                try {
+                  const result = await api<{ provider: string; model: string }>('/images/check', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      provider: settings.provider,
+                      model: settings.model,
+                      imageProvider: settings.imageProvider,
+                      imageModel: settings.imageModel,
+                      imageModeration: settings.imageModeration,
+                    }),
+                  });
+                  setImageCheck(
+                    `Connected via ${result.provider}: ${result.model}. No messages or strikes were created.`,
+                  );
+                } catch (e) {
+                  setImageCheck(
+                    e instanceof Error ? e.message : 'The vision connection check failed.',
+                  );
+                } finally {
+                  setCheckingImage(false);
+                }
+              }}
+            >
+              <RefreshCw size={15} className={checkingImage ? 'spin' : ''} />
+              {checkingImage ? 'Checking vision…' : 'Check vision connection'}
+            </button>
+            <p className="field-help">
+              Uses your current model choices for a small real image request. Provider billing and
+              the live token budget apply; settings are not saved by this check.
+            </p>
+            {imageCheck && (
+              <p className="field-help" role="status">
+                {imageCheck}
+              </p>
+            )}
           </div>
         </section>
         <section className="panel settings-panel">
